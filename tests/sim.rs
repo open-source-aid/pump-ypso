@@ -1,6 +1,6 @@
 #![cfg(feature = "sim")]
 
-use pump_shared::{Address, BleOp, BleResult, Timestamp, Uuid};
+use pump_shared::{Address, BleOp, BleResult, NotifyKind, Timestamp, Uuid};
 use pump_testkit::SimDevice;
 use pump_ypso::protocol::{setting, uuids, KEY_LEN, NONCE_LEN};
 use pump_ypso::sim::{Versions, YpsoSim, PASSWORD_LEN};
@@ -151,6 +151,11 @@ fn the_link_answers_like_a_real_link_and_refuses_ops_when_down() {
     for op in [
         BleOp::RequestFastInterval,
         BleOp::Subscribe {
+            service: uuids::CONTROL_SERVICE,
+            characteristic: uuids::CONTROL_NOTIFY,
+            kind: NotifyKind::Notification,
+        },
+        BleOp::Unsubscribe {
             service: uuids::CONTROL_SERVICE,
             characteristic: uuids::CONTROL_NOTIFY,
         },

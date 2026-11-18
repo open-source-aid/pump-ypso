@@ -324,7 +324,9 @@ impl SimDevice for YpsoSim {
                 self.drop_link();
                 BleResult::Done
             }
-            BleOp::RequestFastInterval | BleOp::Subscribe { .. } => BleResult::Done,
+            BleOp::RequestFastInterval | BleOp::Subscribe { .. } | BleOp::Unsubscribe { .. } => {
+                BleResult::Done
+            }
             BleOp::Read {
                 service,
                 characteristic,
