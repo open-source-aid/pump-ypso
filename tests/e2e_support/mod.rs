@@ -80,6 +80,7 @@ pub fn harness<D: SimDevice>(device: D, blob: &Blob) -> Harness<D> {
     let mut harness = Harness::new(device);
     harness.announced = Some(DRIVER.info());
     harness.resendable.insert(uuids::AUTHORIZATION_PASSWORD);
+    harness.resendable.insert(uuids::SETTING_ID);
     harness.store.insert(Slot::Session, blob.encode());
     harness
 }
