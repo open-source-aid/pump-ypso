@@ -12,11 +12,15 @@ categories = ["no-std", "embedded"]
 [features]
 default = ["std"]
 std = ["pump-shared/std"]
-sim = ["std", "dep:pump-testkit"]
+sim = ["pump-shared/sim", "dep:chacha20", "dep:curve25519-dalek"]
 opn = []
 
 [dependencies]
+chacha20 = { version = "0.9", default-features = false, optional = true }
 chacha20poly1305 = { version = "0.10", default-features = false, features = ["alloc"] }
+curve25519-dalek = { version = "4.1", default-features = false, optional = true }
 libm = "0.2"
 pump-shared = { git = "https://github.com/u-osaid/pump-shared", branch = "main", default-features = false }
-pump-testkit = { git = "https://github.com/u-osaid/pump-testkit", branch = "main", optional = true }
+
+[dev-dependencies]
+pump-testkit = { git = "https://github.com/u-osaid/pump-testkit", branch = "main" }
