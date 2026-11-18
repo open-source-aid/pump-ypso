@@ -1,7 +1,7 @@
 use pump_shared::{BleOp, BleResult, KeyRef, NotifyKind, Timestamp};
-use pump_testkit::SimDevice;
 use pump_ypso::protocol::{uuids, Characteristic};
 use pump_ypso::sim::{Versions, YpsoSim};
+use tester_harness::SimDevice;
 
 use super::{connect, ids, read, write, App, KEY, PASSWORD};
 

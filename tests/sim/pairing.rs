@@ -3,10 +3,10 @@ use chacha20poly1305::aead::{AeadInPlace, KeyInit};
 use chacha20poly1305::{XChaCha20Poly1305, XNonce};
 use curve25519_dalek::montgomery::MontgomeryPoint;
 use pump_shared::{BleResult, KeyRef};
-use pump_testkit::SimDevice;
 use pump_ypso::protocol::{uuids, Characteristic, KEY_LEN};
 use pump_ypso::sim::YpsoSim;
 use pump_ypso::{Crypto, Frames};
+use tester_harness::SimDevice;
 
 use super::{read, write, App, KEY, PASSWORD};
 

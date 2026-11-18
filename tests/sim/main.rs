@@ -11,10 +11,10 @@ mod therapy;
 mod transport;
 
 use pump_shared::{Address, BleOp, BleResult, Timestamp, Uuid};
-use pump_testkit::SimDevice;
 use pump_ypso::protocol::{uuids, Characteristic, KEY_LEN, NONCE_LEN};
 use pump_ypso::sim::{crc16, YpsoSim, PASSWORD_LEN};
 use pump_ypso::{Crypto, Frames, Opened, ProtoError, Reassembler};
+use tester_harness::SimDevice;
 
 pub const KEY: [u8; KEY_LEN] = [0x42; KEY_LEN];
 pub const PASSWORD: [u8; PASSWORD_LEN] = [0x5A; PASSWORD_LEN];

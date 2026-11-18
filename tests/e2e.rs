@@ -14,9 +14,9 @@ use pump_shared::{
     Completion, EngineState, Event, Extended, Failure, HistoryEvent, Notification, Outcome,
     Percent, PumpMode, Refusal, Report, Sequence, Slot, TempBasalRate, UtcTime,
 };
-use pump_testkit::{Fault, SimDevice};
 use pump_ypso::protocol::{setting, uuids};
 use pump_ypso::sim::YpsoSim;
+use tester_harness::{Fault, SimDevice};
 
 const HALF_HOUR: Duration = Duration::from_secs(1800);
 const HOUR: Duration = Duration::from_secs(3600);
@@ -31,16 +31,6 @@ fn stored_epoch(run: &Run<YpsoSim>) -> u32 {
             .try_into()
             .unwrap(),
     )
-}
-
-fn refreshed(run: Run<YpsoSim>) -> Run<YpsoSim> {
-    let mut fresh = harness(run.harness.device, &Blob::default());
-    fresh.store = run.harness.store;
-    fresh.now = run.harness.now;
-    Run {
-        harness: fresh,
-        engine: run.engine,
-    }
 }
 
 fn completed(outcome: Outcome) -> bool {
@@ -322,7 +312,7 @@ fn survives_a_fault_at_every_step(fault: Fault) {
             ),
             "{outcome:?}"
         );
-        let mut run = refreshed(run);
+        let mut run = run;
         let again = run.run(Command::Status);
         assert!(completed(again.clone()), "step {step}: {again:?}");
         step += 1;
@@ -727,7 +717,7 @@ fn sweeps_every_command(make: fn() -> YpsoSim, fault: Fault) {
             if run.harness.transcript.len() < before + step {
                 break;
             }
-            let mut run = refreshed(run);
+            let mut run = run;
             let again = run.run(Command::Status);
             assert!(
                 matches!(

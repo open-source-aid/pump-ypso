@@ -1,7 +1,7 @@
 use pump_shared::{BleResult, KeyRef};
-use pump_testkit::SimDevice;
 use pump_ypso::protocol::{setting, uuids, Characteristic};
 use pump_ypso::sim::YpsoSim;
+use tester_harness::SimDevice;
 
 use super::{ids, le_i32, read, safevar, tbr, write, App, PASSWORD};
 

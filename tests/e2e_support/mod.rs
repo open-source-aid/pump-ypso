@@ -4,10 +4,10 @@ use pump_shared::{
     Address, Advertisement, Command, CommandId, Config, Driver, Engine, Event, HistoryEntry,
     InsulinAmount, Outcome, PumpStatus, Report, Sequence, Slot,
 };
-use pump_testkit::{Harness, SimDevice};
 use pump_ypso::protocol::{setting, uuids, KEY_LEN};
 use pump_ypso::sim::{YpsoSim, PASSWORD_LEN};
 use pump_ypso::DRIVER;
+use tester_harness::{Harness, SimDevice};
 
 pub const KEY: [u8; KEY_LEN] = [0x42; KEY_LEN];
 pub const PASSWORD: [u8; PASSWORD_LEN] = [0x5A; PASSWORD_LEN];

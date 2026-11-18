@@ -16,10 +16,10 @@ use pump_shared::{
     HistoryEvent, OpId, Outcome, Percent, PumpMode, Refusal, Report, Secret, Sequence, Slot,
     TempBasalRate, Timestamp, Uuid,
 };
-use pump_testkit::{Fault, SimDevice};
 use pump_ypso::protocol::{setting, uuids, NONCE_LEN};
 use pump_ypso::sim::{crc16, YpsoSim};
 use pump_ypso::{Crypto, Frames, DRIVER};
+use tester_harness::{Fault, SimDevice};
 
 const DOSES: [Uuid; 3] = [
     uuids::START_STOP_BOLUS,

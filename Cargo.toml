@@ -24,4 +24,4 @@ libm = "0.2"
 pump-shared = { git = "https://github.com/u-osaid/pump-shared", branch = "main", default-features = false }
 
 [dev-dependencies]
-pump-testkit = { git = "https://github.com/u-osaid/pump-testkit", branch = "main" }
+tester-harness = { git = "https://github.com/u-osaid/tester", branch = "main" }
