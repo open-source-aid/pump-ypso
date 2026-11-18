@@ -1,5 +1,3 @@
-use alloc::vec::Vec;
-
 use pump_shared::BleResult;
 
 pub(super) const SECONDS_PER_DAY: i64 = 86_400;
@@ -31,27 +29,6 @@ pub(super) fn parse_safevar(data: &[u8]) -> Option<i32> {
 
 pub(super) fn le_i32(data: &[u8], at: usize) -> i32 {
     i32::from_le_bytes([data[at], data[at + 1], data[at + 2], data[at + 3]])
-}
-
-pub fn crc16(data: &[u8]) -> u16 {
-    let mut padded = data.to_vec();
-    padded.resize(data.len().div_ceil(4) * 4, 0);
-    let mut crc = u32::MAX;
-    for block in padded.chunks(4) {
-        for byte in block.iter().rev() {
-            crc ^= u32::from(byte.reverse_bits());
-            for _ in 0..8 {
-                crc = (crc >> 1) ^ (0xEDB8_8320 & (crc & 1).wrapping_neg());
-            }
-        }
-    }
-    crc.reverse_bits() as u16
-}
-
-pub(super) fn with_crc(mut bytes: Vec<u8>) -> Vec<u8> {
-    let crc = crc16(&bytes);
-    bytes.extend_from_slice(&crc.to_le_bytes());
-    bytes
 }
 
 pub(super) fn civil_date(days_since_2000: i64) -> (i64, i64, i64) {

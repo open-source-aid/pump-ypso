@@ -2,8 +2,9 @@ use alloc::vec::Vec;
 
 use pump_shared::BleResult;
 
-use super::codec::{parse_safevar, safevar, with_crc};
+use super::codec::{parse_safevar, safevar};
 use super::settings::ERR_VALUE_INVALID;
+use crate::engine::crc::with_crc16;
 use crate::protocol::ERR_VALUE_CORRUPT;
 
 const ERR_ENTRY_INDEX_INVALID: u8 = 0x84;
@@ -76,6 +77,6 @@ impl Log {
         bytes.extend_from_slice(&entry.sequence.to_le_bytes());
         bytes.extend_from_slice(&(index as u16).to_le_bytes());
         self.index += 1;
-        Ok(with_crc(bytes))
+        Ok(with_crc16(bytes))
     }
 }

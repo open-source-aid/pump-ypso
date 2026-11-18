@@ -14,6 +14,7 @@ default = ["std"]
 std = ["pump-shared/std"]
 sim = ["pump-shared/sim", "dep:chacha20", "dep:curve25519-dalek"]
 opn = []
+delivery = []
 
 [dependencies]
 chacha20 = { version = "0.9", default-features = false, optional = true }

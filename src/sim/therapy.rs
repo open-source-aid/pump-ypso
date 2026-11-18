@@ -3,9 +3,10 @@ use alloc::vec::Vec;
 
 use pump_shared::{BleResult, Timestamp};
 
-use super::codec::{crc16, le_i32, parse_safevar, status, with_crc};
+use super::codec::{le_i32, parse_safevar, status};
 use super::settings::ERR_VALUE_INVALID;
 use super::YpsoSim;
+use crate::engine::crc::{crc16_ok, with_crc16};
 use crate::protocol::{setting, ERR_VALUE_CORRUPT};
 
 pub const BOLUS_AMOUNT_CAP: u16 = 112;
@@ -315,7 +316,7 @@ impl YpsoSim {
 
     pub(super) fn bolus_command(&mut self, data: &[u8], now: u64) -> BleResult {
         let command = if self.isc() {
-            (data.len() == 15 && crc16(&data[..13]) == u16::from_le_bytes([data[13], data[14]]))
+            (data.len() == 15 && crc16_ok(data))
                 .then(|| (le_i32(data, 0), le_i32(data, 4), le_i32(data, 8), data[12]))
         } else {
             parse_safevar(data).map(|total| (total, 0, 0, IMMEDIATE))
@@ -443,7 +444,7 @@ impl YpsoSim {
         bytes.extend_from_slice(&percent.to_le_bytes());
         bytes.extend_from_slice(&remaining.to_le_bytes());
         if self.isc() {
-            with_crc(bytes)
+            with_crc16(bytes)
         } else {
             bytes
         }
@@ -483,6 +484,6 @@ impl YpsoSim {
         for field in slow {
             bytes.extend_from_slice(&field.to_le_bytes());
         }
-        with_crc(bytes)
+        with_crc16(bytes)
     }
 }

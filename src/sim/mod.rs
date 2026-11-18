@@ -15,7 +15,7 @@ use alloc::vec::Vec;
 
 use crate::protocol::{setting, KEY_LEN};
 
-pub use codec::crc16;
+pub use crate::engine::crc::crc16;
 pub use history::{Entry, Log};
 pub use therapy::{Alarm, BOLUS_AMOUNT_CAP};
 
