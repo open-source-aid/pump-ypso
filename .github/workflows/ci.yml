@@ -18,4 +18,5 @@ jobs:
       - run: cargo fmt --check
       - run: cargo clippy --all-features --all-targets -- -D warnings
       - run: cargo build --no-default-features --target thumbv7em-none-eabihf
+      - run: cargo build --no-default-features --features sim,opn --target thumbv7em-none-eabihf
       - run: cargo llvm-cov --all-features --fail-under-lines 100 --fail-under-regions 100 --fail-under-functions 100
