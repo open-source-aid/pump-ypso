@@ -47,12 +47,15 @@ impl YpsoSim {
     }
 
     pub(super) fn gate(&self, characteristic: Characteristic, now: u64) -> Option<u8> {
-        let settings = matches!(
+        let exempt = matches!(
             characteristic,
-            Characteristic::SettingId | Characteristic::SettingValue
+            Characteristic::SettingId
+                | Characteristic::SettingValue
+                | Characteristic::StartStopBolus
+                | Characteristic::StartStopTbr
         );
         self.security()
-            .or_else(|| self.access().filter(|_| !settings))
+            .or_else(|| self.access().filter(|_| !exempt))
             .or_else(|| self.pause(now).filter(|_| self.crypto_service))
     }
 }

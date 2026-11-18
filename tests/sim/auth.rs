@@ -25,13 +25,22 @@ fn before_the_password_the_probe_reads_and_commands_are_refused_with_0x08() {
     ] {
         assert_eq!(app.get(characteristic), Err(BleResult::Status(0x08)));
     }
-    assert_eq!(
-        app.send(Characteristic::StartStopTbr, &super::tbr(150, 30)),
-        BleResult::Status(0x08)
-    );
     assert_eq!(app.sim.app_counter, 0);
     assert_eq!(app.authorise(&PASSWORD), BleResult::Done);
     assert!(app.get(Characteristic::GetSystemStatus).is_ok());
+}
+
+#[test]
+fn dose_commands_are_not_filtered_by_the_access_level() {
+    let mut app = App::new(YpsoSim::new(KEY, PASSWORD));
+    assert_eq!(
+        app.send(Characteristic::StartStopTbr, &super::tbr(150, 30)),
+        BleResult::Done
+    );
+    assert_eq!(
+        app.send(Characteristic::StartStopBolus, &super::bolus(100, 0, 0, 1)),
+        BleResult::Done
+    );
 }
 
 #[test]

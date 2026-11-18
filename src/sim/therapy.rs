@@ -408,6 +408,8 @@ impl YpsoSim {
                 || !(MIN_TBR_MINUTES..=max_minutes).contains(&minutes)
             {
                 ERR_VALUE_INVALID
+            } else if !self.running() {
+                ERR_COMMAND_FAILED
             } else if self.temp.is_some() {
                 ERR_INTERNAL
             } else {

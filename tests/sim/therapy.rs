@@ -316,12 +316,12 @@ fn stopping_the_pump_aborts_every_delivery_and_logs_the_mode() {
 }
 
 #[test]
-fn a_temp_basal_is_taken_on_a_stopped_pump_and_runs_out_its_timer() {
+fn a_temp_basal_is_refused_with_0x87_while_delivery_is_not_allowed() {
     let mut app = App::connected();
     app.sim.stop(app.at());
-    assert_eq!(temp(&mut app, 150, 30), BleResult::Done);
-    app.wait(30 * MINUTE);
-    assert_eq!(app.events()[1..], [(10, [150, 30, 0])]);
+    assert_eq!(temp(&mut app, 150, 30), BleResult::Status(0x87));
+    assert_eq!(temp(&mut app, 100, 0), BleResult::Done);
+    assert_eq!(app.events(), [(14, [3, 0, 0])]);
 }
 
 #[test]
