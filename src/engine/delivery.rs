@@ -15,6 +15,7 @@ const POLL: Duration = Duration::from_secs(2);
 const POLLS: usize = 450;
 const SETTLE: usize = 5;
 const COMMAND_FAILED: u8 = 0x87;
+const TBR_RUNNING: u8 = 0xB0;
 
 fn hundredths(amount: InsulinAmount) -> i32 {
     (amount.milliunits() / 10) as i32
@@ -30,10 +31,18 @@ impl Ctx {
             .write(characteristic, WriteClass::Therapy, payload)
             .await
         {
-            Err(Halt::Failed(Failure::Status(COMMAND_FAILED))) => {
-                Err(Halt::Refused(Refusal::NotRunning))
+            Err(halt @ Halt::Failed(Failure::Status(COMMAND_FAILED))) => {
+                Err(self.why_refused(halt).await)
             }
+            Err(Halt::Failed(Failure::Status(TBR_RUNNING))) => Err(Halt::Refused(Refusal::Busy)),
             other => other,
+        }
+    }
+
+    async fn why_refused(&self, halt: Halt) -> Halt {
+        match self.system().await {
+            Ok(system) if system.suspended => Halt::Refused(Refusal::NotRunning),
+            _ => halt,
         }
     }
 
@@ -106,7 +115,10 @@ impl Ctx {
         if !allowed {
             return Ok(refused(Refusal::OutOfLimits));
         }
-        if self.system().await?.percent != 100 {
+        self.wait_window(true, None).await?;
+        self.wait_window(true, Some(duration)).await?;
+        let cleared = self.system().await?.percent != 100;
+        if cleared {
             self.write(
                 Characteristic::StartStopTbr,
                 WriteClass::Therapy,
@@ -115,11 +127,12 @@ impl Ctx {
             .await?;
             self.apply(Transition::TempBasalEnded);
         }
-        self.wait_window(false, Some(duration)).await?;
         let value = i32::from(percent.get());
+        let after = |halt| if cleared { unknown(halt) } else { halt };
         self.dose(Characteristic::StartStopTbr, &tbr(value, minutes(duration)))
-            .await?;
-        self.verify_percent(value).await?;
+            .await
+            .map_err(after)?;
+        self.verify_percent(value).await.map_err(after)?;
         self.apply(Transition::TempBasalStarted {
             rate: TempBasalRate::Percent(percent),
             duration,
@@ -137,7 +150,9 @@ impl Ctx {
         for (hour, (want, have)) in (0..).zip(wanted.iter().zip(current)) {
             if *want != have {
                 self.wait_window(false, None).await?;
-                self.write_setting(setting::basal_a(hour), *want).await?;
+                self.write_setting(setting::basal_a(hour), *want)
+                    .await
+                    .map_err(unknown)?;
             }
         }
         match self.active_profile().await.map_err(unknown)? {

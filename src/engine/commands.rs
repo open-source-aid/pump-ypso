@@ -18,6 +18,9 @@ pub(super) const VERIFY: usize = 4;
 pub(super) const IMMEDIATE: u8 = 1;
 pub(super) const SLOW: u8 = 2;
 pub(super) const HOUR: u64 = 3600;
+const DAY: u64 = 86_400;
+const ALLOWANCE: u64 = 200;
+const MIDNIGHT_MARGIN: u64 = 5;
 
 pub(super) fn refused(refusal: Refusal) -> Outcome {
     Outcome::Refused(refusal)
@@ -129,10 +132,14 @@ impl Ctx {
         }
         self.wait_window(false, None).await?;
         let wall = self.wall_millis().unwrap_or(wall);
-        let boundary = (wall + 200).div_ceil(1000);
+        let mut boundary = (wall + ALLOWANCE).div_ceil(1000);
+        let of_day = (boundary as i64 + i64::from(self.utc_offset)).rem_euclid(DAY as i64) as u64;
+        if of_day >= DAY - MIDNIGHT_MARGIN {
+            boundary += DAY - of_day + MIDNIGHT_MARGIN;
+        }
         io::sleep(
             &self.io,
-            Duration::from_millis(boundary * 1000 - 200 - wall),
+            Duration::from_millis(boundary * 1000 - ALLOWANCE - wall),
         )
         .await;
         let target = (boundary as i64 + i64::from(self.utc_offset)).max(0) as u64;

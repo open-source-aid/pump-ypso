@@ -14,6 +14,7 @@ use crate::Characteristic;
 
 const Y2K: u64 = 946_684_800;
 const DAY: u64 = 86_400;
+const NO_BASAL_CAP: i32 = i32::MAX / 10;
 const WINDOW: u64 = 180;
 const MINUTE: Duration = Duration::from_secs(60);
 const QUARTER: Duration = Duration::from_secs(15 * 60);
@@ -29,19 +30,27 @@ pub(crate) struct System {
     pub(crate) battery: Option<Percent>,
     pub(crate) basal: BasalRate,
     pub(crate) percent: i32,
+    pub(crate) remaining: Option<i32>,
 }
 
+const SYSTEM_WITH_REMAINING: usize = 18;
+const SYSTEM_WITH_CRC: usize = 20;
+
 impl System {
-    fn decode(bytes: &[u8]) -> Self {
+    fn decode(bytes: &[u8]) -> Step<Self> {
+        if bytes.len() >= SYSTEM_WITH_CRC && !crc16_ok(&bytes[..SYSTEM_WITH_CRC]) {
+            return Err(Halt::Failed(Failure::Protocol));
+        }
         let reservoir = le_i32(bytes, 1);
         let suspended = bytes[0] == 3;
-        Self {
+        Ok(Self {
             suspended,
             reservoir: (reservoir != -1).then(|| InsulinAmount::from_milliunits(milli(reservoir))),
             battery: (bytes[5] <= 5).then(|| Percent::new(u16::from(bytes[5]) * 20)),
             basal: BasalRate::from_milliunits_per_hour(milli(le_i32(bytes, 6))),
             percent: if suspended { 0 } else { le_i32(bytes, 10) },
-        }
+            remaining: (bytes.len() >= SYSTEM_WITH_REMAINING).then(|| le_i32(bytes, 14)),
+        })
     }
 }
 
@@ -177,9 +186,7 @@ impl Device {
 
 impl Ctx {
     pub(crate) async fn system(&self) -> Step<System> {
-        Ok(System::decode(
-            &self.read_sized(Characteristic::GetSystemStatus, 14).await?,
-        ))
+        System::decode(&self.read_sized(Characteristic::GetSystemStatus, 14).await?)
     }
 
     pub(crate) async fn bolus_state(&self) -> Step<BolusState> {
@@ -206,6 +213,14 @@ impl Ctx {
         }
     }
 
+    async fn basal_limit(&self, id: u16) -> Step<Option<i32>> {
+        match self.read_setting(id).await {
+            Ok(value) => Ok((value > 0).then_some(value)),
+            Err(Halt::Failed(Failure::Status(_))) => Ok(None),
+            Err(other) => Err(other),
+        }
+    }
+
     pub(crate) async fn device(&self) -> Step<Device> {
         let step = self.setting_or(setting::BOLUS_STEP_SELECTION, 5).await?;
         let step = if step % 5 == 0 && step <= 100 {
@@ -213,15 +228,21 @@ impl Ctx {
         } else {
             5
         };
-        let min = self.setting_or(setting::BASAL_RATE_MIN, 2).await?;
-        let max = self.setting_or(setting::BASAL_RATE_MAX, 4_000).await?;
+        let cap = self.basal_limit(setting::BASAL_RATE_CAP).await?;
+        let min = self.basal_limit(setting::BASAL_RATE_MIN).await?;
+        let max = self.basal_limit(setting::BASAL_RATE_MAX).await?;
+        let upper = [cap, max]
+            .into_iter()
+            .flatten()
+            .min()
+            .unwrap_or(NO_BASAL_CAP);
         let mut tbr = [200, 240, 200, 240];
         for (value, id) in tbr.iter_mut().zip(setting::TBR_LONG_SCALE_MAX..) {
             *value = self.setting_or(id, *value as i32).await? as u64;
         }
         Ok(Device::new(
             milli(step),
-            (milli(min), milli(max)),
+            (milli(min.unwrap_or(0)), milli(upper)),
             tbr,
             self.extended(),
         ))
@@ -279,7 +300,13 @@ impl Ctx {
             {
                 Basal::Temporary { rate, duration }
             }
-            _ => Basal::Unknown,
+            (percent, _) => match system.remaining {
+                Some(remaining) => Basal::Temporary {
+                    rate: TempBasalRate::Percent(Percent::new(percent as u16)),
+                    duration: MINUTE * remaining.max(0).unsigned_abs(),
+                },
+                None => Basal::Unknown,
+            },
         };
         let extended = match (bolus.extended_sequence > 0, before.extended) {
             (false, _) => Extended::Idle,
@@ -358,6 +385,38 @@ fn civil_from_days(days: u64) -> (u16, u8, u8) {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::engine::crc::with_crc16;
+
+    fn status_bytes(percent: i32, remaining: i32) -> alloc::vec::Vec<u8> {
+        let mut bytes = alloc::vec![10u8];
+        bytes.extend(1_000i32.to_le_bytes());
+        bytes.push(4);
+        bytes.extend(800i32.to_le_bytes());
+        bytes.extend(percent.to_le_bytes());
+        bytes.extend(remaining.to_le_bytes());
+        bytes
+    }
+
+    #[test]
+    fn system_status_decodes_remaining_and_checks_the_crc() {
+        let bytes = status_bytes(150, 26);
+        let system = System::decode(&bytes).unwrap();
+        assert_eq!(system.percent, 150);
+        assert_eq!(system.remaining, Some(26));
+        assert!(!system.suspended);
+
+        let sealed = with_crc16(bytes.clone());
+        assert_eq!(System::decode(&sealed).unwrap().remaining, Some(26));
+
+        let mut corrupt = sealed.clone();
+        *corrupt.last_mut().unwrap() ^= 0xFF;
+        assert_eq!(
+            System::decode(&corrupt),
+            Err(Halt::Failed(Failure::Protocol))
+        );
+
+        assert_eq!(System::decode(&bytes[..14]).unwrap().remaining, None);
+    }
 
     #[test]
     fn civil_dates_round_trip() {

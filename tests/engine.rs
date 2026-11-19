@@ -32,6 +32,7 @@ struct Pump {
     deaf: bool,
     answer: Option<(Uuid, Vec<u8>)>,
     raw: Option<(Uuid, Vec<u8>)>,
+    refuse: Option<(Uuid, u8)>,
     grow: VecDeque<usize>,
     tx: VecDeque<Vec<u8>>,
 }
@@ -43,6 +44,7 @@ impl Pump {
             deaf: false,
             answer: None,
             raw: None,
+            refuse: None,
             grow: VecDeque::new(),
             tx: VecDeque::new(),
         }
@@ -88,6 +90,11 @@ impl SimDevice for Pump {
             }
             BleOp::Write { characteristic, .. } if self.deaf && DOSES.contains(characteristic) => {
                 return BleResult::Done;
+            }
+            BleOp::Write { characteristic, .. } => {
+                if let Some((_, code)) = self.refuse.filter(|(c, _)| c == characteristic) {
+                    return BleResult::Status(code);
+                }
             }
             _ => {}
         }
@@ -140,7 +147,7 @@ fn a_pump_that_cannot_deliver_refuses_the_dose() {
         run.run(Command::Bolus {
             amount: units(1_000)
         }),
-        Outcome::Refused(Refusal::NotRunning)
+        Outcome::Failed(Failure::Status(0x87))
     );
     run.harness.device.reservoir = 10_000;
     let now = run.harness.now;
@@ -412,7 +419,13 @@ fn observes_what_the_pump_is_doing() {
         .unwrap();
     run.restart();
     let therapy = run.status().therapy;
-    assert_eq!(therapy.basal, Basal::Unknown);
+    assert!(matches!(
+        therapy.basal,
+        Basal::Temporary {
+            rate: TempBasalRate::Percent(percent),
+            ..
+        } if percent == Percent::new(150)
+    ));
     assert!(matches!(therapy.bolus, Bolus::Immediate { .. }));
     assert_eq!(
         therapy.extended,
@@ -629,4 +642,152 @@ fn an_opn_pump_takes_an_immediate_bolus_only() {
         run.run(Command::CancelExtendedBolus),
         Outcome::Completed(Report::Done)
     );
+}
+
+fn basal_max<D: SimDevice>(run: &Run<D>) -> BasalRate {
+    run.harness
+        .events
+        .iter()
+        .find_map(|e| match e {
+            Event::DeviceInfo(info) => Some(info.limits.basal.max),
+            _ => None,
+        })
+        .unwrap()
+}
+
+#[test]
+fn a_negative_basal_cap_leaves_the_pump_maximum_in_place() {
+    let mut pump = sim();
+    pump.settings.insert(setting::BASAL_RATE_CAP, -1);
+    pump.settings.insert(setting::BASAL_RATE_MAX, 2_000);
+    let mut run = Run::new(pump, &Blob::default());
+    run.status();
+    assert_eq!(basal_max(&run), BasalRate::from_milliunits_per_hour(20_000));
+}
+
+#[test]
+fn the_basal_cap_clamps_below_the_pump_maximum() {
+    let mut pump = sim();
+    pump.settings.insert(setting::BASAL_RATE_CAP, 1_000);
+    pump.settings.insert(setting::BASAL_RATE_MAX, 2_500);
+    let mut run = Run::new(pump, &Blob::default());
+    run.status();
+    assert_eq!(basal_max(&run), BasalRate::from_milliunits_per_hour(10_000));
+}
+
+#[test]
+fn no_reported_basal_limits_means_no_ceiling() {
+    let mut pump = sim();
+    pump.settings.insert(setting::BASAL_RATE_CAP, -1);
+    pump.settings.insert(setting::BASAL_RATE_MIN, -1);
+    pump.settings.insert(setting::BASAL_RATE_MAX, -1);
+    let mut run = Run::new(pump, &Blob::default());
+    run.status();
+    assert!(basal_max(&run) >= BasalRate::from_milliunits_per_hour(1_000_000));
+}
+
+#[test]
+fn a_clock_sync_near_midnight_does_not_fall_a_day_behind() {
+    let mut pump = sim();
+    pump.clock = 824_000_000;
+    let mut run = Run::new(pump, &Blob::default());
+    run.status();
+    let midnight = 20_500 * 86_400u64;
+    run.engine
+        .handle_wall_clock(pump_shared::UtcTime::from_unix_millis(
+            (midnight + 86_397) * 1000,
+        ));
+    assert_eq!(
+        run.run(Command::SyncClock),
+        Outcome::Completed(Report::Done)
+    );
+    let clock = match run.run(Command::ReadClock) {
+        Outcome::Completed(Report::Clock(time)) => time.local_seconds(),
+        other => panic!("{other:?}"),
+    };
+    assert!(clock >= midnight + 86_400, "stuck before midnight: {clock}");
+    assert!(
+        clock % 86_400 < 3_600,
+        "not just after midnight: {}",
+        clock % 86_400
+    );
+}
+
+#[cfg(feature = "delivery")]
+#[test]
+fn a_temp_basal_the_pump_reports_already_running_is_busy() {
+    let mut run = Run::new(pump(), &Blob::default());
+    run.status();
+    run.harness.device.refuse = Some((uuids::START_STOP_TBR, 0xB0));
+    assert_eq!(run.run(tbr(150)), Outcome::Refused(Refusal::Busy));
+}
+
+#[cfg(feature = "delivery")]
+#[test]
+fn clearing_a_temp_basal_before_an_unconfirmed_one_is_unknown() {
+    let mut run = Run::new(pump(), &Blob::default());
+    run.status();
+    assert_eq!(run.run(tbr(150)), Outcome::Completed(Report::Done));
+    run.harness.device.deaf = true;
+    assert_eq!(run.run(tbr(80)), Outcome::Unknown);
+}
+
+#[cfg(feature = "delivery")]
+#[test]
+fn a_basal_profile_write_that_fails_partway_is_unknown() {
+    let mut run = Run::new(pump(), &Blob::default());
+    run.status();
+    run.harness.device.refuse = Some((uuids::SETTING_VALUE, 0x82));
+    let profile = BasalProfile::new(vec![BasalSegment {
+        start: Duration::ZERO,
+        rate: BasalRate::from_milliunits_per_hour(900),
+    }])
+    .unwrap();
+    assert_eq!(
+        run.run(Command::SetBasalProfile { profile }),
+        Outcome::Unknown
+    );
+}
+
+#[cfg(feature = "delivery")]
+#[test]
+fn a_dose_refused_while_the_pump_is_quietly_stopped_is_not_running() {
+    let mut run = Run::new(sim(), &Blob::default());
+    run.status();
+    let now = run.harness.now;
+    run.harness.device.stop(now);
+    assert_eq!(
+        run.run(Command::Bolus {
+            amount: units(1_000)
+        }),
+        Outcome::Refused(Refusal::NotRunning)
+    );
+}
+
+#[test]
+fn a_running_temp_basal_without_a_remaining_field_is_unknown() {
+    let mut status = vec![10u8];
+    status.extend(1_000i32.to_le_bytes());
+    status.push(4);
+    status.extend(800i32.to_le_bytes());
+    status.extend(150i32.to_le_bytes());
+    let mut run = Run::new(pump(), &Blob::default());
+    run.status();
+    run.harness.device.answer = Some((uuids::GET_SYSTEM_STATUS, status));
+    assert_eq!(run.status().therapy.basal, Basal::Unknown);
+}
+
+#[test]
+fn a_system_status_with_a_bad_crc_is_a_protocol_error() {
+    let mut status = vec![10u8];
+    status.extend(1_000i32.to_le_bytes());
+    status.push(4);
+    status.extend(800i32.to_le_bytes());
+    status.extend(100i32.to_le_bytes());
+    status.extend(0i32.to_le_bytes());
+    status.extend([0xFF, 0xFF]);
+    let mut run = Run::new(pump(), &Blob::default());
+    run.status();
+    run.harness.device.answer = Some((uuids::GET_SYSTEM_STATUS, status));
+    assert_eq!(run.run(Command::Status), Outcome::Failed(Failure::Protocol));
 }
