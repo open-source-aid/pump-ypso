@@ -345,6 +345,30 @@ fn refuses_malformed_replies() {
 }
 
 #[test]
+fn a_combined_bolus_front_load_is_not_an_immediate_bolus() {
+    let mut bytes = vec![1];
+    bytes.extend([0; 12]);
+    bytes.push(1);
+    for field in [77i32, 100, 600, 100, 250, 0, 60] {
+        bytes.extend(field.to_le_bytes());
+    }
+    let crc = crc16(&bytes);
+    bytes.extend(crc.to_le_bytes());
+    let mut run = Run::new(pump(), &Blob::default());
+    run.status();
+    run.harness.device.answer = Some((uuids::GET_BOLUS_STATUS, bytes));
+    let therapy = run.status().therapy;
+    assert_eq!(therapy.bolus, Bolus::Idle);
+    assert_eq!(
+        therapy.extended,
+        Extended::Running {
+            amount: units(6_000),
+            duration: Duration::from_secs(3600),
+        }
+    );
+}
+
+#[test]
 fn refuses_a_pump_that_is_not_the_session_one() {
     let mut pump = sim();
     pump.settings.insert(setting::SERIAL_NUMBER_LOWER, 1);
