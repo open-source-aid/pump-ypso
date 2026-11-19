@@ -12,9 +12,8 @@ use std::time::Duration;
 use e2e_support::*;
 use pump_shared::{
     Action, Basal, BasalProfile, BasalRate, BasalSegment, BleOp, BleResult, Bolus, Command,
-    Completion, CompletionError, Component, Driver, EngineState, Event, Extended, Failure,
-    HistoryEvent, OpId, Outcome, Percent, PumpMode, Refusal, Report, Secret, Sequence, Slot,
-    TempBasalRate, Timestamp, Uuid,
+    Completion, CompletionError, Driver, EngineState, Event, Extended, Failure, OpId, Outcome,
+    Percent, PumpMode, Refusal, Report, Secret, Sequence, Slot, TempBasalRate, Timestamp, Uuid,
 };
 use pump_ypso::protocol::{setting, uuids, NONCE_LEN};
 use pump_ypso::sim::{crc16, YpsoSim};
@@ -189,58 +188,6 @@ fn an_unconfirmed_dose_is_unknown() {
 }
 
 #[test]
-fn decodes_every_known_history_entry() {
-    let mut pump = sim();
-    for (kind, values) in [
-        (3, [200, 60, 0]),
-        (1, [200, 60, 0]),
-        (18, [300, 100, 90]),
-        (17, [300, 100, 90]),
-        (30, [150, 0, 0]),
-        (32, [0, 0, 0]),
-        (7, [3, 50, 40]),
-        (14, [10, 0, 0]),
-        (16, [0, 0, 0]),
-        (24, [0, 0, 0]),
-        (25, [0, 0, 0]),
-        (29, [139, 0, 0]),
-    ] {
-        pump.events.push(0, kind, values);
-    }
-    let mut run = Run::new(pump, &Blob::default());
-    let events: Vec<_> = run.history(0).iter().map(|e| e.event).collect();
-    let minutes = |m: u64| Duration::from_secs(m * 60);
-    let bolus = |kind, requested, delivered, duration, in_progress| HistoryEvent::Bolus {
-        kind,
-        requested: units(requested),
-        delivered: units(delivered),
-        duration,
-        automatic: false,
-        in_progress,
-    };
-    use pump_shared::BolusKind::{Extended, Normal};
-    assert_eq!(
-        events,
-        [
-            bolus(Normal, 1_390, 1_390, Duration::ZERO, false),
-            HistoryEvent::Replaced(Component::Cannula),
-            HistoryEvent::Replaced(Component::Battery),
-            HistoryEvent::Rewound,
-            HistoryEvent::Resumed,
-            HistoryEvent::BasalProfileChanged,
-            HistoryEvent::TempBasalEnded,
-            HistoryEvent::ExtendedBolusEnded {
-                delivered: units(1_500)
-            },
-            bolus(Extended, 3_000, 0, minutes(90), true),
-            bolus(Extended, 3_000, 3_000, minutes(90), false),
-            bolus(Extended, 2_000, 0, minutes(60), true),
-            bolus(Extended, 2_000, 2_000, minutes(60), false),
-        ]
-    );
-}
-
-#[test]
 fn skips_corrupt_entries_and_restarts_once_when_the_log_moves() {
     let mut pump = pump();
     for _ in 0..4 {
@@ -258,7 +205,11 @@ fn skips_corrupt_entries_and_restarts_once_when_the_log_moves() {
     assert_eq!(run.run(read_all()), Outcome::Failed(Failure::Protocol));
     run.harness.device.answer = None;
     run.harness.device.grow = [0, 1].into();
-    let sequences: Vec<_> = run.history(0).iter().map(|e| e.sequence.get()).collect();
+    let sequences: Vec<_> = run
+        .history(0)
+        .iter()
+        .map(|e| e.sequence.get() & 0xFFFF)
+        .collect();
     assert_eq!(sequences, [5, 4, 3, 2, 1]);
     run.harness.device.grow = [0, 1, 1, 1, 1, 1].into();
     assert_eq!(run.run(read_all()), Outcome::Failed(Failure::Protocol));

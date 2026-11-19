@@ -2,8 +2,8 @@ use alloc::vec::Vec;
 use core::time::Duration;
 
 use pump_shared::{
-    BolusKind, Component, Failure, HistoryEntry, HistoryEvent, InsulinAmount, Percent, PumpTime,
-    Sequence, TempBasalRate,
+    Alarm, AlarmKind, BolusKind, Component, Failure, HistoryEntry, HistoryEvent, InsulinAmount,
+    Percent, PumpTime, Sequence, TempBasalRate,
 };
 
 use super::crc::crc16_ok;
@@ -14,6 +14,8 @@ use crate::Characteristic;
 const ENTRY_LEN: usize = 19;
 const VALUE_INVALID: u8 = 0x82;
 const INDEX_INVALID: u8 = 0x84;
+const LOG_SHIFT: u32 = 30;
+const SEQUENCE_MASK: u32 = (1 << LOG_SHIFT) - 1;
 
 struct Raw {
     seconds: u32,
@@ -22,6 +24,53 @@ struct Raw {
     sequence: u32,
     index: u16,
     bytes: Vec<u8>,
+}
+
+impl Raw {
+    fn pump_time(&self) -> PumpTime {
+        PumpTime::from_local_seconds(pump_seconds(self.seconds))
+    }
+}
+
+#[derive(Clone, Copy)]
+enum Log {
+    Alarm = 1,
+    Complaint = 2,
+    Event = 3,
+}
+
+impl Log {
+    fn characteristics(self) -> [Characteristic; 3] {
+        match self {
+            Log::Alarm => [
+                Characteristic::AlarmEntryCount,
+                Characteristic::AlarmEntryIndex,
+                Characteristic::AlarmEntryValue,
+            ],
+            Log::Complaint => [
+                Characteristic::ComplaintEntryCount,
+                Characteristic::ComplaintEntryIndex,
+                Characteristic::ComplaintEntryValue,
+            ],
+            Log::Event => [
+                Characteristic::EventEntryCount,
+                Characteristic::EventEntryIndex,
+                Characteristic::EventEntryValue,
+            ],
+        }
+    }
+
+    fn decode(self, raw: &Raw) -> Option<HistoryEvent> {
+        match self {
+            Log::Alarm => alarm(raw),
+            Log::Complaint => complaint(raw),
+            Log::Event => event(raw),
+        }
+    }
+
+    fn sequence(self, raw: &Raw) -> Sequence {
+        Sequence::new((self as u32) << LOG_SHIFT | raw.sequence & SEQUENCE_MASK)
+    }
 }
 
 fn parse(bytes: &[u8]) -> Option<Raw> {
@@ -38,7 +87,7 @@ fn parse(bytes: &[u8]) -> Option<Raw> {
     })
 }
 
-fn decode(raw: &Raw) -> Option<HistoryEvent> {
+fn event(raw: &Raw) -> Option<HistoryEvent> {
     let [a, b, c] = raw.values;
     let amount = |v: u16| InsulinAmount::from_milliunits(u32::from(v) * 10);
     let minutes = |v: u16| Duration::from_secs(u64::from(v) * 60);
@@ -51,20 +100,19 @@ fn decode(raw: &Raw) -> Option<HistoryEvent> {
         in_progress,
     };
     Some(match raw.kind {
-        2 | 26 | 29 | 28 => bolus(BolusKind::Normal, a, a, Duration::ZERO, false),
+        2 | 26 | 28 | 29 => bolus(BolusKind::Normal, a, a, Duration::ZERO, false),
         19 | 27 => bolus(BolusKind::Normal, a, 0, Duration::ZERO, true),
-        3 => bolus(BolusKind::Extended, a, a, minutes(b), false),
+        3 | 30 => bolus(BolusKind::Extended, a, a, minutes(b), false),
         1 => bolus(BolusKind::Extended, a, 0, minutes(b), true),
-        18 => bolus(BolusKind::Extended, a, a, minutes(c), false),
+        18 | 31 => bolus(BolusKind::Extended, a, a, minutes(c), false),
         17 => bolus(BolusKind::Extended, a, 0, minutes(c), true),
-        30 | 31 => HistoryEvent::ExtendedBolusEnded {
-            delivered: amount(a),
-        },
-        9 | 10 => HistoryEvent::TempBasal {
+        9 | 10 | 32 => HistoryEvent::TempBasal {
             rate: TempBasalRate::Percent(Percent::new(a)),
             duration: minutes(b),
         },
-        32 => HistoryEvent::TempBasalEnded,
+        12 | 13 => HistoryEvent::ClockChanged {
+            previous: raw.pump_time(),
+        },
         6..=8 => HistoryEvent::BasalProfileChanged,
         14 if a == 10 => HistoryEvent::Resumed,
         14 => HistoryEvent::Suspended,
@@ -75,92 +123,128 @@ fn decode(raw: &Raw) -> Option<HistoryEvent> {
     })
 }
 
+fn alarm(raw: &Raw) -> Option<HistoryEvent> {
+    let kind = match raw.kind {
+        101 => AlarmKind::BatteryEmpty,
+        104 => AlarmKind::ReservoirEmpty,
+        105 => AlarmKind::Occlusion,
+        106 => AlarmKind::AutoOff,
+        100 | 102 | 103 | 107 | 108 => AlarmKind::Other,
+        _ => return None,
+    };
+    Some(HistoryEvent::Alarm(Alarm {
+        kind,
+        code: u16::from(raw.kind),
+    }))
+}
+
+fn complaint(raw: &Raw) -> Option<HistoryEvent> {
+    let alarm = Alarm {
+        kind: AlarmKind::Other,
+        code: raw.values[0],
+    };
+    match raw.kind {
+        204 => Some(HistoryEvent::AlarmCleared(alarm)),
+        206 => Some(HistoryEvent::Alarm(alarm)),
+        _ => None,
+    }
+}
+
 impl Ctx {
-    async fn entry(&self, index: u16, wide: bool) -> Step<Option<Result<Raw, ()>>> {
-        let speculative = self.read(Characteristic::EventEntryValue).await;
+    fn wide_index(&self) -> bool {
+        self.link
+            .borrow()
+            .as_ref()
+            .is_some_and(|v| v.history >= 1.2)
+    }
+
+    async fn entry(&self, log: Log, index: u16) -> Step<Option<Result<Raw, ()>>> {
+        let [_, select, value] = log.characteristics();
+        let speculative = self.read(value).await;
         if let Ok(raw) = speculative.as_deref().map(parse) {
             if let Some(raw) = raw.filter(|r| r.index == index) {
                 return Ok(Some(Ok(raw)));
             }
         }
-        let value = if wide {
+        let bytes = if self.wide_index() {
             safevar(i32::from(index))
         } else {
             index.to_le_bytes().to_vec()
         };
-        match self
-            .write(
-                Characteristic::EventEntryIndex,
-                WriteClass::Selection,
-                &value,
-            )
-            .await
-        {
+        match self.write(select, WriteClass::Selection, &bytes).await {
             Err(Halt::Failed(Failure::Status(VALUE_INVALID | INDEX_INVALID))) => return Ok(None),
             other => other?,
         }
-        match parse(&self.read(Characteristic::EventEntryValue).await?) {
+        match parse(&self.read(value).await?) {
             Some(raw) if raw.index != index => Err(Halt::Failed(Failure::Protocol)),
             Some(raw) => Ok(Some(Ok(raw))),
             None => Ok(Some(Err(()))),
         }
     }
 
-    pub(crate) async fn history(&self, after: Sequence) -> Step<Vec<HistoryEntry>> {
-        let wide = self
-            .link
-            .borrow()
-            .as_ref()
-            .is_some_and(|v| v.history >= 1.2);
+    async fn walk(&self, log: Log, stop: impl Fn(&Raw) -> bool) -> Step<(Vec<Raw>, Option<u32>)> {
+        let [count, ..] = log.characteristics();
         for _ in 0..2 {
-            let count = super::link::le_i32(
-                &self.read_sized(Characteristic::EventEntryCount, 4).await?,
-                0,
-            );
-            let mut entries: Vec<HistoryEntry> = Vec::new();
-            let mut previous = None;
+            let count = super::link::le_i32(&self.read_sized(count, 4).await?, 0);
+            let mut raws: Vec<Raw> = Vec::new();
+            let mut cutoff = None;
             let mut changed = false;
             for index in 0..u16::try_from(count.max(0)).unwrap_or(u16::MAX) {
-                let raw = match self.entry(index, wide).await? {
+                let raw = match self.entry(log, index).await? {
                     None => break,
                     Some(Err(())) => continue,
                     Some(Ok(raw)) => raw,
                 };
-                if raw.sequence <= after.get() {
+                if stop(&raw) {
+                    cutoff = Some(raw.seconds);
                     break;
                 }
-                if previous.is_some_and(|p| raw.sequence >= p) {
+                if raws.last().is_some_and(|p| raw.sequence >= p.sequence) {
                     changed = true;
                     break;
                 }
-                previous = Some(raw.sequence);
-                if let Some(event) = decode(&raw) {
-                    let local = pump_seconds(raw.seconds);
-                    let pump_time = PumpTime::from_local_seconds(local);
-                    entries.push(HistoryEntry {
-                        sequence: Sequence::new(raw.sequence),
-                        time: pump_time.to_utc(self.utc_offset),
-                        pump_time: Some(pump_time),
-                        event,
-                        raw: raw.bytes,
-                    });
-                }
+                raws.push(raw);
             }
             if !changed {
-                return Ok(entries);
+                return Ok((raws, cutoff));
             }
         }
         Err(Halt::Failed(Failure::Protocol))
     }
 
+    pub(crate) async fn history(&self, after: Sequence) -> Step<Vec<HistoryEntry>> {
+        let after = after.get();
+        let cursor = (after >> LOG_SHIFT == Log::Event as u32).then_some(after & SEQUENCE_MASK);
+        let stop = |raw: &Raw| cursor.is_some_and(|c| raw.sequence <= c);
+        let (raws, cutoff) = self.walk(Log::Event, stop).await?;
+        let mut entries = self.entries(Log::Event, raws);
+        for log in [Log::Alarm, Log::Complaint] {
+            let older = |raw: &Raw| cutoff.is_some_and(|s| raw.seconds < s);
+            let (raws, _) = self.walk(log, older).await?;
+            entries.extend(self.entries(log, raws));
+        }
+        Ok(entries)
+    }
+
+    fn entries(&self, log: Log, raws: Vec<Raw>) -> Vec<HistoryEntry> {
+        raws.into_iter()
+            .filter_map(|raw| {
+                let event = log.decode(&raw)?;
+                let pump_time = raw.pump_time();
+                Some(HistoryEntry {
+                    sequence: log.sequence(&raw),
+                    time: pump_time.to_utc(self.utc_offset),
+                    pump_time: Some(pump_time),
+                    event,
+                    raw: raw.bytes,
+                })
+            })
+            .collect()
+    }
+
     #[cfg(feature = "delivery")]
     pub(crate) async fn newest_sequence(&self) -> Step<u32> {
-        let wide = self
-            .link
-            .borrow()
-            .as_ref()
-            .is_some_and(|v| v.history >= 1.2);
-        Ok(match self.entry(0, wide).await? {
+        Ok(match self.entry(Log::Event, 0).await? {
             Some(Ok(raw)) => raw.sequence,
             _ => 0,
         })
@@ -168,17 +252,63 @@ impl Ctx {
 
     #[cfg(feature = "delivery")]
     pub(crate) async fn delivered_since(&self, sequence: u32) -> Step<Option<InsulinAmount>> {
-        for entry in self.history(Sequence::new(sequence)).await? {
-            if let HistoryEvent::Bolus {
+        let (raws, _) = self
+            .walk(Log::Event, |raw| raw.sequence <= sequence)
+            .await?;
+        Ok(raws.iter().find_map(|raw| match event(raw) {
+            Some(HistoryEvent::Bolus {
                 kind: BolusKind::Normal,
                 delivered,
                 in_progress: false,
                 ..
-            } = entry.event
-            {
-                return Ok(Some(delivered));
-            }
+            }) => Some(delivered),
+            _ => None,
+        }))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn raw(kind: u8, values: [u16; 3], sequence: u32) -> Raw {
+        Raw {
+            seconds: 86_400,
+            kind,
+            values,
+            sequence,
+            index: 0,
+            bytes: Vec::new(),
         }
-        Ok(None)
+    }
+
+    #[test]
+    fn one_pump_sequence_is_three_sequences_one_per_log() {
+        let entry = raw(16, [0; 3], 7);
+        let sequences = [Log::Alarm, Log::Complaint, Log::Event].map(|log| log.sequence(&entry));
+        assert_eq!(
+            sequences.map(Sequence::get),
+            [(1 << 30) | 7, (2 << 30) | 7, (3 << 30) | 7]
+        );
+    }
+
+    #[test]
+    fn each_log_reads_its_own_types() {
+        let entry = raw(206, [17, 0, 0], 1);
+        assert_eq!(Log::Event.decode(&entry), None);
+        assert_eq!(Log::Alarm.decode(&entry), None);
+        assert_eq!(
+            Log::Complaint.decode(&entry),
+            Some(HistoryEvent::Alarm(Alarm {
+                kind: AlarmKind::Other,
+                code: 17
+            }))
+        );
+        assert_eq!(
+            Log::Event.decode(&raw(13, [1, 2, 3], 1)),
+            Some(HistoryEvent::ClockChanged {
+                previous: PumpTime::from_local_seconds(pump_seconds(86_400))
+            })
+        );
     }
 }

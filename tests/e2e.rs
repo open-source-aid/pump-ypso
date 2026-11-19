@@ -10,16 +10,20 @@ use std::time::Duration;
 
 use e2e_support::*;
 use pump_shared::{
-    Action, Basal, BasalProfile, BasalRate, BasalSegment, BleOp, BleResult, Command, CommandId,
-    Completion, EngineState, Event, Extended, Failure, HistoryEvent, Notification, Outcome,
-    Percent, PumpMode, Refusal, Report, Sequence, Slot, TempBasalRate, UtcTime,
+    Action, Alarm, AlarmKind, Basal, BasalProfile, BasalRate, BasalSegment, BleOp, BleResult,
+    BolusKind, Command, CommandId, Completion, Component, EngineState, Event, Extended, Failure,
+    HistoryEvent, Notification, Outcome, Percent, PumpMode, PumpTime, Refusal, Report, Sequence,
+    Slot, TempBasalRate, UtcTime,
 };
 use pump_ypso::protocol::{setting, uuids};
-use pump_ypso::sim::YpsoSim;
+use pump_ypso::sim::{Log, YpsoSim};
 use tester_harness::{Fault, SimDevice};
 
 const HALF_HOUR: Duration = Duration::from_secs(1800);
 const HOUR: Duration = Duration::from_secs(3600);
+const ALARM: u32 = 1 << 30;
+const COMPLAINT: u32 = 2 << 30;
+const EVENT: u32 = 3 << 30;
 
 fn stored_write(run: &Run<YpsoSim>) -> i64 {
     i64::from_le_bytes(run.harness.store[&Slot::Counters][..8].try_into().unwrap())
@@ -620,13 +624,246 @@ fn reads_history() {
             duration: HALF_HOUR
         }
     );
-    assert_eq!(entries[3].sequence, Sequence::new(base));
+    assert_eq!(entries[3].sequence, Sequence::new(EVENT | base));
     assert_eq!(entries[3].raw.len(), 19);
     assert_eq!(
         entries[3].pump_time.unwrap().local_seconds(),
         NOON as u64 + Y2K
     );
-    assert_eq!(run.history(base).len(), 3);
+    assert_eq!(run.history(EVENT | base).len(), 3);
+    assert_eq!(run.history(base).len(), 4);
+}
+
+fn bolus(
+    kind: BolusKind,
+    requested: u32,
+    delivered: u32,
+    minutes: u64,
+    in_progress: bool,
+) -> HistoryEvent {
+    HistoryEvent::Bolus {
+        kind,
+        requested: units(requested),
+        delivered: units(delivered),
+        duration: Duration::from_secs(minutes * 60),
+        automatic: false,
+        in_progress,
+    }
+}
+
+fn percent(percent: u16, minutes: u64) -> HistoryEvent {
+    HistoryEvent::TempBasal {
+        rate: TempBasalRate::Percent(Percent::new(percent)),
+        duration: Duration::from_secs(minutes * 60),
+    }
+}
+
+fn fill(
+    log: &mut Log,
+    tag: u32,
+    entries: Vec<(u8, [u16; 3], Option<HistoryEvent>)>,
+) -> Vec<(u32, HistoryEvent)> {
+    let mut expected: Vec<_> = entries
+        .into_iter()
+        .filter_map(|(kind, values, event)| {
+            let sequence = log.push(NOON as u32, kind, values);
+            event.map(|event| (tag | sequence, event))
+        })
+        .collect();
+    expected.reverse();
+    expected
+}
+
+#[test]
+fn decodes_every_entry_of_every_log() {
+    use BolusKind::{Extended, Normal};
+    let mut pump = sim();
+    let changed = HistoryEvent::ClockChanged {
+        previous: PumpTime::from_local_seconds(NOON as u64 + Y2K),
+    };
+    let alarm = |kind, code| HistoryEvent::Alarm(Alarm { kind, code });
+    let mut expected = fill(
+        &mut pump.events,
+        EVENT,
+        vec![
+            (
+                3,
+                [200, 60, 0],
+                Some(bolus(Extended, 2_000, 2_000, 60, false)),
+            ),
+            (1, [200, 60, 0], Some(bolus(Extended, 2_000, 0, 60, true))),
+            (
+                30,
+                [150, 40, 0],
+                Some(bolus(Extended, 1_500, 1_500, 40, false)),
+            ),
+            (20, [150, 40, 0], None),
+            (
+                18,
+                [300, 100, 90],
+                Some(bolus(Extended, 3_000, 3_000, 90, false)),
+            ),
+            (
+                17,
+                [300, 100, 90],
+                Some(bolus(Extended, 3_000, 0, 90, true)),
+            ),
+            (
+                31,
+                [250, 100, 45],
+                Some(bolus(Extended, 2_500, 2_500, 45, false)),
+            ),
+            (21, [250, 100, 45], None),
+            (2, [250, 0, 0], Some(bolus(Normal, 2_500, 2_500, 0, false))),
+            (19, [300, 0, 0], Some(bolus(Normal, 3_000, 0, 0, true))),
+            (29, [139, 0, 0], Some(bolus(Normal, 1_390, 1_390, 0, false))),
+            (26, [120, 0, 0], Some(bolus(Normal, 1_200, 1_200, 0, false))),
+            (27, [130, 0, 0], Some(bolus(Normal, 1_300, 0, 0, true))),
+            (28, [40, 0, 0], Some(bolus(Normal, 400, 400, 0, false))),
+            (9, [150, 30, 0], Some(percent(150, 30))),
+            (10, [80, 30, 0], Some(percent(80, 30))),
+            (32, [0, 12, 0], Some(percent(0, 12))),
+            (22, [0, 12, 0], None),
+            (12, [14, 3, 24], Some(changed)),
+            (13, [23, 59, 58], Some(changed)),
+            (6, [0; 3], Some(HistoryEvent::BasalProfileChanged)),
+            (7, [3, 50, 40], Some(HistoryEvent::BasalProfileChanged)),
+            (8, [3, 50, 40], Some(HistoryEvent::BasalProfileChanged)),
+            (14, [10, 0, 0], Some(HistoryEvent::Resumed)),
+            (14, [3, 0, 0], Some(HistoryEvent::Suspended)),
+            (16, [0; 3], Some(HistoryEvent::Rewound)),
+            (24, [0; 3], Some(HistoryEvent::Replaced(Component::Battery))),
+            (
+                25,
+                [50, 0, 0],
+                Some(HistoryEvent::Replaced(Component::Cannula)),
+            ),
+            (4, [1_500, 0, 0], None),
+            (5, [10, 0, 0], None),
+            (23, [2_400, 0, 0], None),
+            (33, [2_500, 0, 0], None),
+            (34, [4_000, 0, 0], None),
+        ],
+    );
+    expected.extend(fill(
+        &mut pump.alarms,
+        ALARM,
+        vec![
+            (100, [0; 3], Some(alarm(AlarmKind::Other, 100))),
+            (101, [0; 3], Some(alarm(AlarmKind::BatteryEmpty, 101))),
+            (102, [7, 0, 0], Some(alarm(AlarmKind::Other, 102))),
+            (103, [0; 3], Some(alarm(AlarmKind::Other, 103))),
+            (104, [0; 3], Some(alarm(AlarmKind::ReservoirEmpty, 104))),
+            (105, [0; 3], Some(alarm(AlarmKind::Occlusion, 105))),
+            (106, [0; 3], Some(alarm(AlarmKind::AutoOff, 106))),
+            (107, [0; 3], Some(alarm(AlarmKind::Other, 107))),
+            (108, [0; 3], Some(alarm(AlarmKind::Other, 108))),
+            (99, [0; 3], None),
+        ],
+    ));
+    expected.extend(fill(
+        &mut pump.complaints,
+        COMPLAINT,
+        vec![
+            (206, [17, 1, 0], Some(alarm(AlarmKind::Other, 17))),
+            (205, [17, 0, 0], None),
+            (
+                204,
+                [17, 2, 0],
+                Some(HistoryEvent::AlarmCleared(Alarm {
+                    kind: AlarmKind::Other,
+                    code: 17,
+                })),
+            ),
+            (215, [0; 3], None),
+        ],
+    ));
+    let mut run = Run::new(pump, &Blob::default());
+    let entries = run.history(0);
+    let read: Vec<_> = entries
+        .iter()
+        .map(|e| (e.sequence.get(), e.event))
+        .collect();
+    assert_eq!(read, expected);
+    assert!(entries.iter().all(|e| e.raw.len() == 19
+        && e.pump_time == Some(PumpTime::from_local_seconds(NOON as u64 + Y2K))));
+}
+
+#[test]
+fn reads_only_what_is_newer_in_every_log() {
+    let mut pump = sim();
+    let stamp = NOON as u32;
+    pump.events.push(stamp - 600, 16, [0; 3]);
+    pump.alarms.push(stamp - 900, 105, [0; 3]);
+    pump.complaints.push(stamp - 900, 206, [3, 1, 0]);
+    let cursor = pump.events.push(stamp - 300, 24, [0; 3]);
+    pump.alarms.push(stamp - 300, 101, [0; 3]);
+    let mut run = Run::new(pump, &Blob::default());
+    let all = run.history(0);
+    assert_eq!(all.len(), 5);
+    let newest = all.iter().map(|e| e.sequence.get()).max().unwrap();
+    assert_eq!(newest, EVENT | cursor);
+    let device = &mut run.harness.device;
+    device.events.push(stamp, 25, [0; 3]);
+    device.alarms.push(stamp, 104, [0; 3]);
+    device.complaints.push(stamp, 204, [3, 2, 0]);
+    let read: Vec<_> = run
+        .history(newest)
+        .iter()
+        .map(|e| e.sequence.get())
+        .collect();
+    assert_eq!(read, [EVENT | 3, ALARM | 3, ALARM | 2, COMPLAINT | 2]);
+    assert_eq!(run.history(ALARM | 3).len(), 8);
+}
+
+#[cfg(feature = "delivery")]
+#[test]
+fn history_follows_what_the_pump_did() {
+    let mut run = Run::new(sim(), &Blob::default());
+    run.status();
+    assert_eq!(
+        run.run(temp_basal(150, HALF_HOUR)),
+        Outcome::Completed(Report::Done)
+    );
+    assert_eq!(
+        run.run(Command::CancelTempBasal),
+        Outcome::Completed(Report::Done)
+    );
+    assert_eq!(run.run(extended()), Outcome::Completed(Report::Done));
+    run.harness
+        .advance(run.engine.as_mut(), Duration::from_secs(600))
+        .unwrap();
+    assert_eq!(
+        run.run(Command::CancelExtendedBolus),
+        Outcome::Completed(Report::Done)
+    );
+    assert_eq!(
+        run.run(temp_basal(80, HALF_HOUR)),
+        Outcome::Completed(Report::Done)
+    );
+    run.harness
+        .advance(run.engine.as_mut(), Duration::from_secs(300))
+        .unwrap();
+    let now = run.harness.now;
+    run.harness
+        .device
+        .alarm(pump_ypso::sim::Alarm::Occlusion, now);
+    let events: Vec<_> = run.history(0).into_iter().map(|e| e.event).collect();
+    assert!(
+        matches!(
+            events[..],
+            [
+                HistoryEvent::Suspended,
+                HistoryEvent::TempBasal { rate: TempBasalRate::Percent(p), duration: d },
+                HistoryEvent::Bolus { kind: BolusKind::Extended, delivered, in_progress: false, .. },
+                HistoryEvent::TempBasal { rate: TempBasalRate::Percent(q), .. },
+                HistoryEvent::Alarm(Alarm { kind: AlarmKind::Occlusion, code: 105 }),
+            ] if p == Percent::new(80) && q == Percent::new(150)
+                && d >= Duration::from_secs(300) && d < HALF_HOUR
+                && delivered > units(0) && delivered < units(2_000)
+        ),
+        "{events:?}"
+    );
 }
 
 type Act = fn(&mut Run<YpsoSim>) -> CommandId;
