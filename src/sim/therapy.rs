@@ -238,6 +238,7 @@ impl YpsoSim {
     fn deliver(&mut self, hundredths: i32, at: u64) -> bool {
         if self.reservoir >= hundredths {
             self.reservoir -= hundredths;
+            self.delivered_today += hundredths;
             true
         } else {
             self.reservoir = self.reservoir.min(0);

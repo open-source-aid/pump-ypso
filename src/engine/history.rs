@@ -2,8 +2,8 @@ use alloc::vec::Vec;
 use core::time::Duration;
 
 use pump_shared::{
-    Alarm, AlarmKind, BolusKind, Component, Failure, HistoryEntry, HistoryEvent, InsulinAmount,
-    Percent, PumpTime, Sequence, TempBasalRate,
+    Alarm, AlarmKind, BasalRate, BolusKind, Component, Failure, HistoryEntry, HistoryEvent,
+    InsulinAmount, LimitChange, Percent, PumpTime, Sequence, TempBasalRate,
 };
 
 use super::crc::crc16_ok;
@@ -16,6 +16,8 @@ const VALUE_INVALID: u8 = 0x82;
 const INDEX_INVALID: u8 = 0x84;
 const LOG_SHIFT: u32 = 30;
 const SEQUENCE_MASK: u32 = (1 << LOG_SHIFT) - 1;
+const DEFAULT_BOLUS_CAP: u32 = 3_000;
+const DEFAULT_BASAL_CAP: u32 = 4_000;
 
 struct Raw {
     seconds: u32,
@@ -90,6 +92,7 @@ fn parse(bytes: &[u8]) -> Option<Raw> {
 fn event(raw: &Raw) -> Option<HistoryEvent> {
     let [a, b, c] = raw.values;
     let amount = |v: u16| InsulinAmount::from_milliunits(u32::from(v) * 10);
+    let cap = |v: u16, default: u32| u32::try_from(v as i16).unwrap_or(default) * 10;
     let minutes = |v: u16| Duration::from_secs(u64::from(v) * 60);
     let bolus = |kind, requested: u16, delivered: u16, duration, in_progress| HistoryEvent::Bolus {
         kind,
@@ -119,6 +122,24 @@ fn event(raw: &Raw) -> Option<HistoryEvent> {
         16 => HistoryEvent::Rewound,
         24 => HistoryEvent::Replaced(Component::Battery),
         25 => HistoryEvent::Replaced(Component::Cannula),
+        4 => bolus(BolusKind::Priming, a, a, Duration::ZERO, false),
+        23 => HistoryEvent::DailyTotal {
+            day: raw.pump_time(),
+            amount: InsulinAmount::from_milliunits(
+                (u32::from(b) << 16 | u32::from(a)).saturating_mul(10),
+            ),
+        },
+        5 if a % 5 == 0 && (5..=100).contains(&a) => {
+            HistoryEvent::LimitChanged(LimitChange::BolusStep { value: amount(a) })
+        }
+        33 => HistoryEvent::LimitChanged(LimitChange::MaxBolus {
+            value: InsulinAmount::from_milliunits(cap(a, DEFAULT_BOLUS_CAP)),
+            previous: InsulinAmount::from_milliunits(cap(b, DEFAULT_BOLUS_CAP)),
+        }),
+        34 => HistoryEvent::LimitChanged(LimitChange::MaxBasal {
+            value: BasalRate::from_milliunits_per_hour(cap(a, DEFAULT_BASAL_CAP)),
+            previous: BasalRate::from_milliunits_per_hour(cap(b, DEFAULT_BASAL_CAP)),
+        }),
         _ => return None,
     })
 }

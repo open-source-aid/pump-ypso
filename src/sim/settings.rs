@@ -1,21 +1,40 @@
 use alloc::vec;
 use alloc::vec::Vec;
 
-use pump_shared::BleResult;
+use pump_shared::{BleResult, Timestamp};
 
 use super::codec::{civil_date, days_since_2000, parse_safevar, safevar, SECONDS_PER_DAY};
+use super::therapy::BOLUS_AMOUNT_CAP;
 use super::YpsoSim;
 use crate::protocol::{setting, ERR_INVALID_ID, ERR_VALUE_CORRUPT};
 
 pub(super) const ERR_VALUE_INVALID: u8 = 0x82;
+const PRIMING_FINISHED: u8 = 4;
+const BOLUS_STEP_CHANGED: u8 = 5;
 const BASAL_PROFILE_A_CHANGED: u8 = 7;
 const BASAL_PROFILE_B_CHANGED: u8 = 8;
 const DATE_CHANGED: u8 = 12;
 const TIME_CHANGED: u8 = 13;
+const DAILY_TOTAL: u8 = 23;
+const BOLUS_AMOUNT_CAP_CHANGED: u8 = 33;
+const BASAL_RATE_CAP_CHANGED: u8 = 34;
 
 const SETTING_IDS: core::ops::RangeInclusive<i32> = 1..=122;
 
 impl YpsoSim {
+    pub fn change_setting(&mut self, id: u16, value: i32, now: Timestamp) {
+        self.advance(now.as_millis());
+        self.set(id, value, now.as_millis());
+    }
+
+    pub fn prime(&mut self, hundredths: i32, now: Timestamp) {
+        self.advance(now.as_millis());
+        self.reservoir -= hundredths;
+        let stamp = self.stamp(now.as_millis());
+        self.events
+            .push(stamp, PRIMING_FINISHED, [hundredths as u16, 0, 0]);
+    }
+
     pub(super) fn pump_secs(&self, at: u64) -> i64 {
         (self.clock * 1000 + at as i64).div_euclid(1000)
     }
@@ -58,16 +77,26 @@ impl YpsoSim {
         let Some(value) = parse_safevar(data) else {
             return BleResult::Status(ERR_VALUE_CORRUPT);
         };
+        self.set(id, value, now);
+        BleResult::Done
+    }
+
+    fn set(&mut self, id: u16, value: i32, at: u64) {
         let old = self.settings.insert(id, value).unwrap_or_default();
         let slot = id.wrapping_sub(setting::BASAL_PROFILE_A_01);
-        if slot < 2 * setting::BASAL_SLOTS {
-            let kind = [BASAL_PROFILE_A_CHANGED, BASAL_PROFILE_B_CHANGED]
-                [usize::from(slot / setting::BASAL_SLOTS)];
-            let values = [slot % setting::BASAL_SLOTS, value as u16, old as u16];
-            let stamp = self.stamp(now);
-            self.events.push(stamp, kind, values);
-        }
-        BleResult::Done
+        let (kind, values) = match id {
+            setting::BOLUS_STEP_SELECTION => (BOLUS_STEP_CHANGED, [value as u16, 0, 0]),
+            BOLUS_AMOUNT_CAP => (BOLUS_AMOUNT_CAP_CHANGED, [value as u16, old as u16, 0]),
+            setting::BASAL_RATE_CAP => (BASAL_RATE_CAP_CHANGED, [value as u16, old as u16, 0]),
+            _ if slot < 2 * setting::BASAL_SLOTS => (
+                [BASAL_PROFILE_A_CHANGED, BASAL_PROFILE_B_CHANGED]
+                    [usize::from(slot / setting::BASAL_SLOTS)],
+                [slot % setting::BASAL_SLOTS, value as u16, old as u16],
+            ),
+            _ => return,
+        };
+        let stamp = self.stamp(at);
+        self.events.push(stamp, kind, values);
     }
 
     pub(super) fn select_counter(&mut self, data: &[u8]) -> BleResult {
@@ -133,6 +162,12 @@ impl YpsoSim {
             return BleResult::Status(ERR_VALUE_INVALID);
         }
         let secs = self.pump_secs(now);
+        if days != secs.div_euclid(SECONDS_PER_DAY) {
+            let total = core::mem::take(&mut self.delivered_today) as u32;
+            let stamp = self.stamp(now);
+            self.events
+                .push(stamp, DAILY_TOTAL, [total as u16, (total >> 16) as u16, 0]);
+        }
         let values = [day, month, (year - 2000) as u8];
         self.set_clock(
             days * SECONDS_PER_DAY + secs.rem_euclid(SECONDS_PER_DAY),

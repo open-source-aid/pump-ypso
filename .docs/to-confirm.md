@@ -18,7 +18,7 @@ What the simulator implements from the spec, Rockit and the firmware verificatio
 | 12 | Pump stop and alarm effects | mode value 3 when stopped, therapy aborted, alarms active until acknowledged, zero alarm payloads | stop from the pump menu, trigger a test occlusion, read setting 2 and both logs |
 | 13 | Basal delivery model | 3-minute pulses with carry; status basal rate is the profile slot before the temp basal | watch the reservoir; read the status with a temp basal running |
 | 14 | Off-step bolus | accepted | send 0.07 U with the step at 0.10 U |
-| 15 | Setting writes | any id accepted; profile switch logs nothing | write a non-basal setting and an out-of-range basal rate |
+| 15 | Setting writes | any id accepted; profile switch logs nothing; 112/113 log 33/34 (firmware); 3 logs 5 on any write, remote or `change_setting` (the firmware names the writer, not its callers) | write a non-basal setting and an out-of-range basal rate |
 | 16 | Offline pairing details | Rockit's current choices; fixed challenge; no "challenge in progress" 0x88; 0x81 without key at the exchange write; 0x88/0x89 also block sealed operations | one offline pairing: two offer reads, the blob write, sealed reads at 0, 4 and 6 minutes |
 | 17 | `key_agree` result | raw X25519 | contract decision in pump-shared |
 | 18 | Access before the password outside settings | 0x08 for everything else; one full-access password | probe each service before the password and after each key |
@@ -27,3 +27,6 @@ What the simulator implements from the spec, Rockit and the firmware verificatio
 | 21 | Persistence across reconnect | history index and counter selection kept; settings selection reset | reconnect and read a value without selecting first |
 | 22 | Combined bolus | immediate part counted in the extended delivered field; sequences from 1 per log | run a combined bolus and read its status |
 | 23 | Default values | 10-byte supervisor value and synthetic settings are placeholders | read them on the pump |
+| 24 | BLE view of the 12-byte history payload | the entry's three `u16` are the payload's first 6 bytes (`v0` low, `v0` high, `v1` low): every layout in [history-firmware.md](history-firmware.md) fits them, so 33/34 read new then previous and 23 reads a `u32` | lower the bolus cap from 25 to 10 U on the pump, read the type 33 entry: expect `[1000, 2500, _]` |
+| 25 | Daily total | written only on a SystemDate write to another day, stamped before the change; no midnight or storage-mode record; priming not counted | leave the pump over midnight, prime, then read the type 23 entries |
+| 26 | Negative caps in 33/34 | read as Rockit's defaults for settings 112/113 (30.0 U, 40.0 U/h) | change a cap on a pump that never had one set, read the previous value |

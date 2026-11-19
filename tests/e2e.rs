@@ -12,11 +12,11 @@ use e2e_support::*;
 use pump_shared::{
     Action, Alarm, AlarmKind, Basal, BasalProfile, BasalRate, BasalSegment, BleOp, BleResult,
     BolusKind, Command, CommandId, Completion, Component, EngineState, Event, Extended, Failure,
-    HistoryEvent, Notification, Outcome, Percent, PumpMode, PumpTime, Refusal, Report, Sequence,
-    Slot, TempBasalRate, UtcTime,
+    HistoryEvent, LimitChange, Notification, Outcome, Percent, PumpMode, PumpTime, Refusal, Report,
+    Sequence, Slot, TempBasalRate, UtcTime,
 };
 use pump_ypso::protocol::{setting, uuids};
-use pump_ypso::sim::{Log, YpsoSim};
+use pump_ypso::sim::{Log, YpsoSim, BOLUS_AMOUNT_CAP};
 use tester_harness::{Fault, SimDevice};
 
 const HALF_HOUR: Duration = Duration::from_secs(1800);
@@ -601,7 +601,7 @@ fn reads_history() {
     pump.events.push(stamp, 2, [250, 0, 0]);
     pump.events.push(stamp, 19, [300, 0, 0]);
     pump.events.push(stamp, 14, [3, 0, 0]);
-    pump.events.push(stamp, 23, [1, 2, 3]);
+    pump.events.push(stamp, 20, [1, 2, 3]);
     let mut run = Run::new(pump, &Blob::default());
     let entries = run.history(0);
     let events: Vec<_> = entries.iter().map(|e| e.event).collect();
@@ -674,6 +674,33 @@ fn fill(
     expected
 }
 
+fn step(milli: u32) -> HistoryEvent {
+    HistoryEvent::LimitChanged(LimitChange::BolusStep {
+        value: units(milli),
+    })
+}
+
+fn daily(milli: u32) -> HistoryEvent {
+    HistoryEvent::DailyTotal {
+        day: PumpTime::from_local_seconds(NOON as u64 + Y2K),
+        amount: units(milli),
+    }
+}
+
+fn max_bolus(value: u32, previous: u32) -> HistoryEvent {
+    HistoryEvent::LimitChanged(LimitChange::MaxBolus {
+        value: units(value),
+        previous: units(previous),
+    })
+}
+
+fn max_basal(value: u32, previous: u32) -> HistoryEvent {
+    HistoryEvent::LimitChanged(LimitChange::MaxBasal {
+        value: BasalRate::from_milliunits_per_hour(value),
+        previous: BasalRate::from_milliunits_per_hour(previous),
+    })
+}
+
 #[test]
 fn decodes_every_entry_of_every_log() {
     use BolusKind::{Extended, Normal};
@@ -738,11 +765,21 @@ fn decodes_every_entry_of_every_log() {
                 [50, 0, 0],
                 Some(HistoryEvent::Replaced(Component::Cannula)),
             ),
-            (4, [1_500, 0, 0], None),
-            (5, [10, 0, 0], None),
-            (23, [2_400, 0, 0], None),
-            (33, [2_500, 0, 0], None),
-            (34, [4_000, 0, 0], None),
+            (
+                4,
+                [1_500, 7, 0],
+                Some(bolus(BolusKind::Priming, 15_000, 15_000, 0, false)),
+            ),
+            (5, [10, 0, 0], Some(step(100))),
+            (5, [7, 0, 0], None),
+            (5, [105, 0, 0], None),
+            (5, [0, 0, 0], None),
+            (23, [2_400, 0, 0], Some(daily(24_000))),
+            (23, [0x86A0, 1, 0], Some(daily(1_000_000))),
+            (33, [2_500, 3_000, 0], Some(max_bolus(25_000, 30_000))),
+            (33, [0xFFFF, 1_000, 0], Some(max_bolus(30_000, 10_000))),
+            (34, [300, 4_000, 0], Some(max_basal(3_000, 40_000))),
+            (34, [500, 0x8000, 0], Some(max_basal(5_000, 40_000))),
         ],
     );
     expected.extend(fill(
@@ -787,6 +824,57 @@ fn decodes_every_entry_of_every_log() {
     assert_eq!(read, expected);
     assert!(entries.iter().all(|e| e.raw.len() == 19
         && e.pump_time == Some(PumpTime::from_local_seconds(NOON as u64 + Y2K))));
+}
+
+#[test]
+fn a_date_change_records_the_daily_total() {
+    let mut run = Run::new(sim(), &Blob::default());
+    run.harness.advance(run.engine.as_mut(), HOUR).unwrap();
+    let now = (NOON as u64 + Y2K) * 1000 + run.harness.now.as_millis();
+    run.engine
+        .handle_wall_clock(UtcTime::from_unix_millis(now + 86_400_000));
+    assert_eq!(
+        run.run(Command::SyncClock),
+        Outcome::Completed(Report::Done)
+    );
+    let entries = run.history(0);
+    let device = &run.harness.device;
+    let delivered = (15_000 - device.reservoir - device.delivered_today) as u32;
+    let totals: Vec<_> = entries
+        .iter()
+        .filter(|e| matches!(e.event, HistoryEvent::DailyTotal { .. }))
+        .collect();
+    assert_eq!(totals.len(), 1);
+    assert!(delivered > 0);
+    assert_eq!(
+        totals[0].event,
+        HistoryEvent::DailyTotal {
+            day: totals[0].pump_time.unwrap(),
+            amount: units(delivered * 10),
+        }
+    );
+}
+
+#[test]
+fn pump_side_changes_reach_history() {
+    let mut run = Run::new(sim(), &Blob::default());
+    let now = run.harness.now;
+    let device = &mut run.harness.device;
+    device.prime(150, now);
+    device.change_setting(setting::BOLUS_STEP_SELECTION, 20, now);
+    device.change_setting(BOLUS_AMOUNT_CAP, 1_000, now);
+    device.change_setting(setting::BASAL_RATE_CAP, 300, now);
+    device.change_setting(setting::TIME_FORMAT, 1, now);
+    let events: Vec<_> = run.history(0).into_iter().map(|e| e.event).collect();
+    assert_eq!(
+        events[..4],
+        [
+            max_basal(3_000, 40_000),
+            max_bolus(10_000, 25_000),
+            step(200),
+            bolus(BolusKind::Priming, 1_500, 1_500, 0, false),
+        ]
+    );
 }
 
 #[test]

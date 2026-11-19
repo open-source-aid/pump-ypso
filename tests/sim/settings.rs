@@ -236,11 +236,15 @@ fn a_clock_write_moves_the_pump_clock_and_logs_where_it_went() {
         app.get(Characteristic::SystemDate),
         Ok(vec![0xE8, 0x07, 0x02, 0x1D])
     );
-    assert_eq!(app.events(), [(13, [23, 59, 58]), (12, [29, 2, 24])]);
+    assert_eq!(
+        app.events(),
+        [(13, [23, 59, 58]), (23, [0, 0, 0]), (12, [29, 2, 24])]
+    );
     let stamps: Vec<u32> = app.sim.events.entries.iter().map(|e| e.timestamp).collect();
+    let before_date = (8036 * 86_400 + 86_398) as u32;
     assert_eq!(
         stamps,
-        [JAN_1_2022_01_09_03 as u32, (8036 * 86_400 + 86_398) as u32]
+        [JAN_1_2022_01_09_03 as u32, before_date, before_date]
     );
     app.wait(2_500);
     assert_eq!(
