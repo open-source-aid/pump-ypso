@@ -187,13 +187,17 @@ fn an_unconfirmed_dose_is_unknown() {
     );
 }
 
-#[test]
-fn skips_corrupt_entries_and_restarts_once_when_the_log_moves() {
+fn log_of(count: usize) -> Pump {
     let mut pump = pump();
-    for _ in 0..4 {
+    for _ in 0..count {
         pump.sim.events.push(0, 16, [0; 3]);
     }
-    let mut run = Run::new(pump, &Blob::default());
+    pump
+}
+
+#[test]
+fn skips_corrupt_entries_without_failing_the_history() {
+    let mut run = Run::new(log_of(4), &Blob::default());
     let mut corrupt = entry(16, 0);
     corrupt[18] ^= 0xFF;
     run.harness.device.answer = Some((uuids::EVENT_ENTRY_VALUE, corrupt));
@@ -201,9 +205,11 @@ fn skips_corrupt_entries_and_restarts_once_when_the_log_moves() {
         run.run(read_all()),
         Outcome::Completed(Report::History(vec![]))
     );
-    run.harness.device.answer = Some((uuids::EVENT_ENTRY_VALUE, entry(16, 7)));
-    assert_eq!(run.run(read_all()), Outcome::Failed(Failure::Protocol));
-    run.harness.device.answer = None;
+}
+
+#[test]
+fn restarts_once_when_the_log_grows_then_settles() {
+    let mut run = Run::new(log_of(4), &Blob::default());
     run.harness.device.grow = [0, 1].into();
     let sequences: Vec<_> = run
         .history(0)
@@ -211,8 +217,27 @@ fn skips_corrupt_entries_and_restarts_once_when_the_log_moves() {
         .map(|e| e.sequence.get() & 0xFFFF)
         .collect();
     assert_eq!(sequences, [5, 4, 3, 2, 1]);
+}
+
+#[test]
+fn a_log_that_keeps_moving_is_tolerated_not_failed() {
+    let mut run = Run::new(log_of(4), &Blob::default());
+    run.harness.device.answer = Some((uuids::EVENT_ENTRY_VALUE, entry(16, 7)));
+    assert_eq!(run.history(0).len(), 1);
+    let mut run = Run::new(log_of(4), &Blob::default());
     run.harness.device.grow = [0, 1, 1, 1, 1, 1].into();
-    assert_eq!(run.run(read_all()), Outcome::Failed(Failure::Protocol));
+    assert!(matches!(
+        run.run(read_all()),
+        Outcome::Completed(Report::History(_))
+    ));
+}
+
+#[test]
+fn a_value_0x84_past_the_fill_ends_the_log_without_failing() {
+    let mut pump = log_of(2);
+    pump.sim.events.capacity = Some(12);
+    let mut run = Run::new(pump, &Blob::default());
+    assert_eq!(run.history(0).len(), 2);
 }
 
 #[test]
@@ -287,12 +312,25 @@ fn refuses_malformed_replies() {
     run.harness.device.raw = Some((uuids::GET_SYSTEM_STATUS, vec![0x00]));
     assert_eq!(run.run(Command::Status), Outcome::Failed(Failure::Protocol));
     run.harness.device.raw = None;
-    run.harness.device.sim.pump_counter = 0;
-    assert_eq!(run.run(Command::Status), Outcome::Failed(Failure::Protocol));
     let mut run = Run::new(sim(), &Blob::default());
     run.status();
     run.harness.device.key = Some([1; 32]);
-    assert_eq!(run.run(Command::Status), Outcome::Failed(Failure::Protocol));
+    assert_eq!(
+        run.run(Command::Status),
+        Outcome::Failed(Failure::KeyRejected)
+    );
+    assert_eq!(run.engine.state(), EngineState::KeyRejected);
+}
+
+#[test]
+fn a_stale_read_counter_is_adopted_not_refused() {
+    let mut run = Run::new(sim(), &Blob::default());
+    run.status();
+    run.harness.device.pump_counter = 0;
+    assert!(matches!(
+        run.run(Command::Status),
+        Outcome::Completed(Report::Status(_))
+    ));
 }
 
 #[test]

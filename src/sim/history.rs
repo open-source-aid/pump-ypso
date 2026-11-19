@@ -20,6 +20,7 @@ pub struct Entry {
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct Log {
     pub entries: Vec<Entry>,
+    pub capacity: Option<usize>,
     index: usize,
 }
 
@@ -42,8 +43,12 @@ impl Log {
         }
     }
 
+    fn reported(&self) -> usize {
+        self.capacity.unwrap_or(self.entries.len())
+    }
+
     pub(super) fn count(&self) -> Vec<u8> {
-        safevar(self.entries.len() as i32).to_vec()
+        safevar(self.reported() as i32).to_vec()
     }
 
     pub(super) fn select(&mut self, data: &[u8], safevar_width: bool) -> BleResult {
@@ -56,7 +61,7 @@ impl Log {
         };
         match index.map(usize::try_from) {
             None => BleResult::Status(ERR_VALUE_CORRUPT),
-            Some(Ok(index)) if index < self.entries.len() => {
+            Some(Ok(index)) if index < self.reported() => {
                 self.index = index;
                 BleResult::Done
             }

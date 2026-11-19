@@ -634,6 +634,46 @@ fn reads_history() {
     assert_eq!(run.history(base).len(), 4);
 }
 
+#[test]
+fn a_running_bolus_at_the_cursor_is_reread_but_a_settled_one_is_not() {
+    let mut pump = sim();
+    let running = pump.events.push(NOON as u32, 19, [300, 0, 0]);
+    let mut run = Run::new(pump, &Blob::default());
+    let entries = run.history(EVENT | running);
+    assert_eq!(entries.len(), 1);
+    assert!(matches!(
+        entries[0].event,
+        HistoryEvent::Bolus {
+            in_progress: true,
+            ..
+        }
+    ));
+    let mut pump = sim();
+    let settled = pump.events.push(NOON as u32, 2, [250, 0, 0]);
+    let mut run = Run::new(pump, &Blob::default());
+    assert!(run.history(EVENT | settled).is_empty());
+}
+
+#[test]
+fn clock_changes_unwind_the_offset_of_older_entries() {
+    let mut pump = sim();
+    pump.events.push(NOON as u32, 2, [100, 0, 0]);
+    pump.events.push(NOON as u32, 12, [0, 0, 0]);
+    pump.events.push(NOON as u32, 2, [200, 0, 0]);
+    let mut run = Run::new(pump, &Blob::default());
+    let entries = run.history(0);
+    let at = |seq| {
+        entries
+            .iter()
+            .find(|e| e.sequence.get() == EVENT | seq)
+            .unwrap()
+            .time
+            .as_unix_millis() as i64
+    };
+    let step = -(NOON % 86_400);
+    assert_eq!(at(1) - at(3), step * 1000);
+}
+
 fn bolus(
     kind: BolusKind,
     requested: u32,

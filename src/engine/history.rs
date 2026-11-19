@@ -144,6 +144,43 @@ fn event(raw: &Raw) -> Option<HistoryEvent> {
     })
 }
 
+fn clamp(offset: i64) -> i32 {
+    offset.clamp(i64::from(i32::MIN), i64::from(i32::MAX)) as i32
+}
+
+fn days_from_civil(year: i64, month: i64, day: i64) -> i64 {
+    let year = year - i64::from(month <= 2);
+    let era = if year >= 0 { year } else { year - 399 } / 400;
+    let yoe = year - era * 400;
+    let doy = (153 * (if month > 2 { month - 3 } else { month + 9 }) + 2) / 5 + day - 1;
+    let doe = yoe * 365 + yoe / 4 - yoe / 100 + doy;
+    era * 146_097 + doe - 719_468
+}
+
+fn clock_step(raw: &Raw) -> Option<i64> {
+    let [a, b, c] = raw.values.map(i64::from);
+    let secs = i64::from(raw.seconds);
+    match raw.kind {
+        12 if a <= 23 && b <= 59 && c <= 59 => {
+            Some(a * 3_600 + b * 60 + c - secs.rem_euclid(86_400))
+        }
+        13 if (1..=31).contains(&a) && (1..=12).contains(&b) => {
+            Some((days_from_civil(2_000 + c, b, a) - 10_957 - secs.div_euclid(86_400)) * 86_400)
+        }
+        _ => None,
+    }
+}
+
+fn running(raw: &Raw) -> bool {
+    matches!(
+        event(raw),
+        Some(HistoryEvent::Bolus {
+            in_progress: true,
+            ..
+        })
+    )
+}
+
 fn alarm(raw: &Raw) -> Option<HistoryEvent> {
     let kind = match raw.kind {
         101 => AlarmKind::BatteryEmpty,
@@ -196,15 +233,15 @@ impl Ctx {
             Err(Halt::Failed(Failure::Status(VALUE_INVALID | INDEX_INVALID))) => return Ok(None),
             other => other?,
         }
-        match parse(&self.read(value).await?) {
-            Some(raw) if raw.index != index => Err(Halt::Failed(Failure::Protocol)),
-            Some(raw) => Ok(Some(Ok(raw))),
-            None => Ok(Some(Err(()))),
+        match self.read(value).await {
+            Err(Halt::Failed(Failure::Status(VALUE_INVALID | INDEX_INVALID))) => Ok(None),
+            other => Ok(Some(parse(&other?).ok_or(()))),
         }
     }
 
     async fn walk(&self, log: Log, stop: impl Fn(&Raw) -> bool) -> Step<(Vec<Raw>, Option<u32>)> {
         let [count, ..] = log.characteristics();
+        let mut collected = (Vec::new(), None);
         for _ in 0..2 {
             let count = super::link::le_i32(&self.read_sized(count, 4).await?, 0);
             let mut raws: Vec<Raw> = Vec::new();
@@ -229,14 +266,15 @@ impl Ctx {
             if !changed {
                 return Ok((raws, cutoff));
             }
+            collected = (raws, cutoff);
         }
-        Err(Halt::Failed(Failure::Protocol))
+        Ok(collected)
     }
 
     pub(crate) async fn history(&self, after: Sequence) -> Step<Vec<HistoryEntry>> {
         let after = after.get();
         let cursor = (after >> LOG_SHIFT == Log::Event as u32).then_some(after & SEQUENCE_MASK);
-        let stop = |raw: &Raw| cursor.is_some_and(|c| raw.sequence <= c);
+        let stop = |raw: &Raw| cursor.is_some_and(|c| raw.sequence <= c && !running(raw));
         let (raws, cutoff) = self.walk(Log::Event, stop).await?;
         let mut entries = self.entries(Log::Event, raws);
         for log in [Log::Alarm, Log::Complaint] {
@@ -248,13 +286,20 @@ impl Ctx {
     }
 
     fn entries(&self, log: Log, raws: Vec<Raw>) -> Vec<HistoryEntry> {
+        let mut offset = i64::from(self.utc_offset);
         raws.into_iter()
             .filter_map(|raw| {
+                let here = offset;
+                if matches!(log, Log::Event) {
+                    if let Some(step) = clock_step(&raw) {
+                        offset -= step;
+                    }
+                }
                 let event = log.decode(&raw)?;
                 let pump_time = raw.pump_time();
                 Some(HistoryEntry {
                     sequence: log.sequence(&raw),
-                    time: pump_time.to_utc(self.utc_offset),
+                    time: pump_time.to_utc(clamp(here)),
                     pump_time: Some(pump_time),
                     event,
                     raw: raw.bytes,
@@ -331,5 +376,33 @@ mod tests {
                 previous: PumpTime::from_local_seconds(pump_seconds(86_400))
             })
         );
+    }
+
+    #[test]
+    fn clock_step_reads_time_and_date_changes_and_rejects_the_impossible() {
+        assert_eq!(clock_step(&raw(12, [0, 0, 0], 1)), Some(0));
+        assert_eq!(clock_step(&raw(12, [1, 0, 0], 1)), Some(3_600));
+        assert_eq!(clock_step(&raw(12, [24, 0, 0], 1)), None);
+        assert_eq!(clock_step(&raw(12, [0, 60, 0], 1)), None);
+        assert_eq!(clock_step(&raw(12, [0, 0, 60], 1)), None);
+        assert_eq!(clock_step(&raw(13, [3, 1, 0], 1)), Some(86_400));
+        assert_eq!(clock_step(&raw(13, [0, 1, 0], 1)), None);
+        assert_eq!(clock_step(&raw(13, [1, 13, 0], 1)), None);
+        assert_eq!(clock_step(&raw(16, [0, 0, 0], 1)), None);
+    }
+
+    #[test]
+    fn days_from_civil_matches_known_dates_across_the_leap_rules() {
+        assert_eq!(days_from_civil(1970, 1, 1), 0);
+        assert_eq!(days_from_civil(2000, 3, 1), 11_017);
+        assert_eq!(days_from_civil(2000, 1, 1), 10_957);
+        assert_eq!(days_from_civil(-1, 2, 28), -719_835);
+    }
+
+    #[test]
+    fn an_offset_beyond_i32_is_clamped() {
+        assert_eq!(clamp(i64::MAX), i32::MAX);
+        assert_eq!(clamp(i64::MIN), i32::MIN);
+        assert_eq!(clamp(5), 5);
     }
 }

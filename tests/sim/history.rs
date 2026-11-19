@@ -127,6 +127,22 @@ fn an_entry_is_nineteen_bytes_in_four_frames() {
 }
 
 #[test]
+fn a_count_may_report_capacity_and_a_read_past_the_fill_is_0x84() {
+    let mut app = App::connected();
+    app.sim.events = three_entries();
+    app.sim.events.capacity = Some(10);
+    assert_eq!(app.get(Characteristic::EventEntryCount), Ok(safevar(10)));
+    assert_eq!(
+        app.send(Characteristic::EventEntryIndex, &safevar(5)),
+        BleResult::Done
+    );
+    assert_eq!(
+        app.get(Characteristic::EventEntryValue),
+        Err(BleResult::Status(0x84))
+    );
+}
+
+#[test]
 fn logs_are_scenario_knobs() {
     let mut log = Log::default();
     assert_eq!(log.push(7, 23, [1, 2, 3]), 1);

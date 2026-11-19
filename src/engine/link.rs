@@ -222,14 +222,14 @@ impl Ctx {
                 .await?;
             message = rx.push(&frame);
         }
-        let protocol = Halt::Failed(Failure::Protocol);
-        let message = message.map_err(|_| protocol)?.unwrap_or_default();
-        let opened = crypto.open(&message).map_err(|_| protocol)?;
+        let message = message
+            .map_err(|_| Halt::Failed(Failure::Protocol))?
+            .unwrap_or_default();
+        let opened = crypto
+            .open(&message)
+            .map_err(|_| Halt::Failed(Failure::KeyRejected))?;
         let mut counters = self.counters.borrow_mut();
         counters.observe_reboot(opened.reboot, opened.counter);
-        if !counters.read_counter_acceptable(opened.counter) {
-            return Err(protocol);
-        }
         counters.accept_read(opened.counter);
         Ok(opened.payload)
     }
