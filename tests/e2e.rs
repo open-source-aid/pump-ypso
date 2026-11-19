@@ -13,7 +13,7 @@ use pump_shared::{
     Action, Alarm, AlarmKind, Basal, BasalProfile, BasalRate, BasalSegment, BleOp, BleResult,
     BolusKind, Command, CommandId, Completion, Component, EngineState, Event, Extended, Failure,
     HistoryEvent, LimitChange, Notification, Outcome, Percent, PumpMode, PumpTime, Refusal, Report,
-    Sequence, Slot, TempBasalRate, UtcTime,
+    Sequence, Slot, TempBasalPhase, TempBasalRate, UtcTime,
 };
 use pump_ypso::protocol::{setting, uuids};
 use pump_ypso::sim::{Log, YpsoSim, BOLUS_AMOUNT_CAP};
@@ -621,7 +621,8 @@ fn reads_history() {
         events[3],
         HistoryEvent::TempBasal {
             rate: TempBasalRate::Percent(Percent::new(150)),
-            duration: HALF_HOUR
+            duration: HALF_HOUR,
+            phase: TempBasalPhase::Ended
         }
     );
     assert_eq!(entries[3].sequence, Sequence::new(EVENT | base));
@@ -691,10 +692,11 @@ fn bolus(
     }
 }
 
-fn percent(percent: u16, minutes: u64) -> HistoryEvent {
+fn percent(percent: u16, minutes: u64, phase: TempBasalPhase) -> HistoryEvent {
     HistoryEvent::TempBasal {
         rate: TempBasalRate::Percent(Percent::new(percent)),
         duration: Duration::from_secs(minutes * 60),
+        phase,
     }
 }
 
@@ -743,7 +745,7 @@ fn max_basal(value: u32, previous: u32) -> HistoryEvent {
 
 #[test]
 fn decodes_every_entry_of_every_log() {
-    use BolusKind::{Extended, Normal};
+    use BolusKind::{Combined, Extended, Normal};
     let mut pump = sim();
     let changed = HistoryEvent::ClockChanged {
         previous: PumpTime::from_local_seconds(NOON as u64 + Y2K),
@@ -768,17 +770,17 @@ fn decodes_every_entry_of_every_log() {
             (
                 18,
                 [300, 100, 90],
-                Some(bolus(Extended, 3_000, 3_000, 90, false)),
+                Some(bolus(Combined, 3_000, 3_000, 90, false)),
             ),
             (
                 17,
                 [300, 100, 90],
-                Some(bolus(Extended, 3_000, 0, 90, true)),
+                Some(bolus(Combined, 3_000, 0, 90, true)),
             ),
             (
                 31,
                 [250, 100, 45],
-                Some(bolus(Extended, 2_500, 2_500, 45, false)),
+                Some(bolus(Combined, 2_500, 2_500, 45, false)),
             ),
             (21, [250, 100, 45], None),
             (2, [250, 0, 0], Some(bolus(Normal, 2_500, 2_500, 0, false))),
@@ -787,9 +789,17 @@ fn decodes_every_entry_of_every_log() {
             (26, [120, 0, 0], Some(bolus(Normal, 1_200, 1_200, 0, false))),
             (27, [130, 0, 0], Some(bolus(Normal, 1_300, 0, 0, true))),
             (28, [40, 0, 0], Some(bolus(Normal, 400, 400, 0, false))),
-            (9, [150, 30, 0], Some(percent(150, 30))),
-            (10, [80, 30, 0], Some(percent(80, 30))),
-            (32, [0, 12, 0], Some(percent(0, 12))),
+            (
+                9,
+                [150, 30, 0],
+                Some(percent(150, 30, TempBasalPhase::Started)),
+            ),
+            (
+                10,
+                [80, 30, 0],
+                Some(percent(80, 30, TempBasalPhase::Ended)),
+            ),
+            (32, [0, 12, 0], Some(percent(0, 12, TempBasalPhase::Ended))),
             (22, [0, 12, 0], None),
             (12, [14, 3, 24], Some(changed)),
             (13, [23, 59, 58], Some(changed)),
@@ -982,15 +992,78 @@ fn history_follows_what_the_pump_did() {
             events[..],
             [
                 HistoryEvent::Suspended,
-                HistoryEvent::TempBasal { rate: TempBasalRate::Percent(p), duration: d },
+                HistoryEvent::TempBasal { rate: TempBasalRate::Percent(p), duration: d, phase: TempBasalPhase::Ended },
                 HistoryEvent::Bolus { kind: BolusKind::Extended, delivered, in_progress: false, .. },
-                HistoryEvent::TempBasal { rate: TempBasalRate::Percent(q), .. },
+                HistoryEvent::TempBasal { rate: TempBasalRate::Percent(q), phase: TempBasalPhase::Ended, .. },
                 HistoryEvent::Alarm(Alarm { kind: AlarmKind::Occlusion, code: 105 }),
             ] if p == Percent::new(80) && q == Percent::new(150)
                 && d >= Duration::from_secs(300) && d < HALF_HOUR
                 && delivered > units(0) && delivered < units(2_000)
         ),
         "{events:?}"
+    );
+}
+
+#[cfg(feature = "delivery")]
+#[test]
+fn a_temp_basal_decodes_started_while_running_then_ended() {
+    let mut run = Run::new(sim(), &Blob::default());
+    run.status();
+    assert_eq!(
+        run.run(temp_basal(150, HALF_HOUR)),
+        Outcome::Completed(Report::Done)
+    );
+    let running = run.history(0);
+    let started = running
+        .iter()
+        .find_map(|entry| match entry.event {
+            HistoryEvent::TempBasal { rate, phase, .. } => Some((rate, phase)),
+            _ => None,
+        })
+        .expect("a temp basal entry");
+    assert_eq!(
+        started,
+        (
+            TempBasalRate::Percent(Percent::new(150)),
+            TempBasalPhase::Started
+        )
+    );
+    assert_eq!(
+        run.run(Command::CancelTempBasal),
+        Outcome::Completed(Report::Done)
+    );
+    let ended = run.history(0);
+    let phase = ended.iter().find_map(|entry| match entry.event {
+        HistoryEvent::TempBasal { phase, .. } => Some(phase),
+        _ => None,
+    });
+    assert_eq!(phase, Some(TempBasalPhase::Ended));
+}
+
+#[test]
+fn a_combined_bolus_decodes_as_combined_not_extended() {
+    let mut run = Run::new(sim(), &Blob::default());
+    run.harness
+        .device
+        .events
+        .push(NOON as u32, 18, [300, 100, 90]);
+    let entries = run.history(0);
+    let bolus = entries.first().map(|entry| entry.event);
+    assert!(
+        matches!(
+            bolus,
+            Some(HistoryEvent::Bolus {
+                kind: BolusKind::Combined,
+                requested,
+                delivered,
+                duration,
+                in_progress: false,
+                ..
+            }) if requested == units(3_000)
+                && delivered == units(3_000)
+                && duration == Duration::from_secs(90 * 60)
+        ),
+        "{bolus:?}"
     );
 }
 

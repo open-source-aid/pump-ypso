@@ -3,7 +3,7 @@ use core::time::Duration;
 
 use pump_shared::{
     Alarm, AlarmKind, BasalRate, BolusKind, Component, Failure, HistoryEntry, HistoryEvent,
-    InsulinAmount, LimitChange, Percent, PumpTime, Sequence, TempBasalRate,
+    InsulinAmount, LimitChange, Percent, PumpTime, Sequence, TempBasalPhase, TempBasalRate,
 };
 
 use super::crc::crc16_ok;
@@ -102,17 +102,20 @@ fn event(raw: &Raw) -> Option<HistoryEvent> {
         automatic: false,
         in_progress,
     };
+    let temp_basal = |percent: u16, duration, phase| HistoryEvent::TempBasal {
+        rate: TempBasalRate::Percent(Percent::new(percent)),
+        duration,
+        phase,
+    };
     Some(match raw.kind {
         2 | 26 | 28 | 29 => bolus(BolusKind::Normal, a, a, Duration::ZERO, false),
         19 | 27 => bolus(BolusKind::Normal, a, 0, Duration::ZERO, true),
         3 | 30 => bolus(BolusKind::Extended, a, a, minutes(b), false),
         1 => bolus(BolusKind::Extended, a, 0, minutes(b), true),
-        18 | 31 => bolus(BolusKind::Extended, a, a, minutes(c), false),
-        17 => bolus(BolusKind::Extended, a, 0, minutes(c), true),
-        9 | 10 | 32 => HistoryEvent::TempBasal {
-            rate: TempBasalRate::Percent(Percent::new(a)),
-            duration: minutes(b),
-        },
+        18 | 31 => bolus(BolusKind::Combined, a, a, minutes(c), false),
+        17 => bolus(BolusKind::Combined, a, 0, minutes(c), true),
+        9 => temp_basal(a, minutes(b), TempBasalPhase::Started),
+        10 | 32 => temp_basal(a, minutes(b), TempBasalPhase::Ended),
         12 | 13 => HistoryEvent::ClockChanged {
             previous: raw.pump_time(),
         },
