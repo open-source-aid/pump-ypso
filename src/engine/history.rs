@@ -319,6 +319,10 @@ impl Ctx {
 
     #[cfg(feature = "delivery")]
     pub(crate) async fn newest_sequence(&self) -> Step<u32> {
+        let [count, ..] = Log::Event.characteristics();
+        if super::link::le_i32(&self.read_sized(count, 4).await?, 0) <= 0 {
+            return Ok(0);
+        }
         Ok(match self.entry(Log::Event, 0).await? {
             Some(Ok(raw)) => raw.sequence,
             _ => 0,

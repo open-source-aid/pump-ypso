@@ -1694,3 +1694,45 @@ fn a_rate_bolus_survives_a_disconnect_at_every_step() {
 fn a_rate_bolus_survives_a_rejected_write_at_every_step() {
     a_rate_bolus_survives_a_fault_at_every_step(Fault::BleStatus(0x87));
 }
+
+#[cfg(feature = "delivery")]
+#[test]
+fn a_bolus_on_an_empty_log_never_probes_a_missing_entry() {
+    let mut run = Run::new(sim(), &Blob::default());
+    run.status();
+    run.harness.transcript.clear();
+    assert_eq!(
+        run.run(Command::Bolus {
+            amount: units(1_500)
+        }),
+        Outcome::Completed(Report::Delivered(units(1_500)))
+    );
+    let value = format!("{:?}", uuids::EVENT_ENTRY_VALUE);
+    let index = format!("{:?}", uuids::EVENT_ENTRY_INDEX);
+    let count = format!("{:?}", uuids::EVENT_ENTRY_COUNT);
+    let dose = format!("{:?}", uuids::START_STOP_BOLUS);
+    let before_dose: Vec<&String> = run
+        .harness
+        .transcript
+        .iter()
+        .take_while(|line| !line.contains(&dose))
+        .collect();
+    let touched = |needle: &str| before_dose.iter().any(|line| line.contains(needle));
+    assert!(touched(&count));
+    assert!(!touched(&value));
+    assert!(!touched(&index));
+}
+
+#[cfg(feature = "delivery")]
+#[test]
+fn a_bolus_tolerates_a_count_without_a_readable_entry() {
+    let mut run = Run::new(sim(), &Blob::default());
+    run.status();
+    run.harness.device.events.capacity = Some(1);
+    assert_eq!(
+        run.run(Command::Bolus {
+            amount: units(1_500)
+        }),
+        Outcome::Completed(Report::Delivered(units(1_500)))
+    );
+}
