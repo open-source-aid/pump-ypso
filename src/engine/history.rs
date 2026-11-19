@@ -164,11 +164,11 @@ fn clock_step(raw: &Raw) -> Option<i64> {
     let [a, b, c] = raw.values.map(i64::from);
     let secs = i64::from(raw.seconds);
     match raw.kind {
-        12 if a <= 23 && b <= 59 && c <= 59 => {
-            Some(a * 3_600 + b * 60 + c - secs.rem_euclid(86_400))
-        }
-        13 if (1..=31).contains(&a) && (1..=12).contains(&b) => {
+        12 if (1..=31).contains(&a) && (1..=12).contains(&b) => {
             Some((days_from_civil(2_000 + c, b, a) - 10_957 - secs.div_euclid(86_400)) * 86_400)
+        }
+        13 if a <= 23 && b <= 59 && c <= 59 => {
+            Some(a * 3_600 + b * 60 + c - secs.rem_euclid(86_400))
         }
         _ => None,
     }
@@ -415,14 +415,14 @@ mod tests {
 
     #[test]
     fn clock_step_reads_time_and_date_changes_and_rejects_the_impossible() {
-        assert_eq!(clock_step(&raw(12, [0, 0, 0], 1)), Some(0));
-        assert_eq!(clock_step(&raw(12, [1, 0, 0], 1)), Some(3_600));
-        assert_eq!(clock_step(&raw(12, [24, 0, 0], 1)), None);
-        assert_eq!(clock_step(&raw(12, [0, 60, 0], 1)), None);
-        assert_eq!(clock_step(&raw(12, [0, 0, 60], 1)), None);
-        assert_eq!(clock_step(&raw(13, [3, 1, 0], 1)), Some(86_400));
-        assert_eq!(clock_step(&raw(13, [0, 1, 0], 1)), None);
-        assert_eq!(clock_step(&raw(13, [1, 13, 0], 1)), None);
+        assert_eq!(clock_step(&raw(13, [0, 0, 0], 1)), Some(0));
+        assert_eq!(clock_step(&raw(13, [1, 0, 0], 1)), Some(3_600));
+        assert_eq!(clock_step(&raw(13, [24, 0, 0], 1)), None);
+        assert_eq!(clock_step(&raw(13, [0, 60, 0], 1)), None);
+        assert_eq!(clock_step(&raw(13, [0, 0, 60], 1)), None);
+        assert_eq!(clock_step(&raw(12, [3, 1, 0], 1)), Some(86_400));
+        assert_eq!(clock_step(&raw(12, [0, 1, 0], 1)), None);
+        assert_eq!(clock_step(&raw(12, [1, 13, 0], 1)), None);
         assert_eq!(clock_step(&raw(16, [0, 0, 0], 1)), None);
     }
 

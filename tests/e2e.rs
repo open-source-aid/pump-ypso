@@ -856,7 +856,7 @@ fn a_running_bolus_at_the_cursor_is_reread_but_a_settled_one_is_not() {
 fn clock_changes_unwind_the_offset_of_older_entries() {
     let mut pump = sim();
     pump.events.push(NOON as u32, 2, [100, 0, 0]);
-    pump.events.push(NOON as u32, 12, [0, 0, 0]);
+    pump.events.push(NOON as u32, 13, [0, 0, 0]);
     pump.events.push(NOON as u32, 2, [200, 0, 0]);
     let mut run = Run::new(pump, &Blob::default());
     let entries = run.history(0);
