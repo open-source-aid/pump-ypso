@@ -341,7 +341,7 @@ fn a_stale_read_counter_is_adopted_not_refused() {
 }
 
 #[test]
-fn a_combined_bolus_front_load_is_not_an_immediate_bolus() {
+fn a_combined_bolus_front_load_reports_through_the_second_immediate_pair() {
     let mut bytes = vec![1];
     bytes.extend([0; 12]);
     bytes.push(1);
@@ -354,7 +354,13 @@ fn a_combined_bolus_front_load_is_not_an_immediate_bolus() {
     run.status();
     run.harness.device.answer = Some((uuids::GET_BOLUS_STATUS, bytes));
     let therapy = run.status().therapy;
-    assert_eq!(therapy.bolus, Bolus::Idle);
+    assert_eq!(
+        therapy.bolus,
+        Bolus::Immediate {
+            requested: units(2_500),
+            delivered: units(1_000),
+        }
+    );
     assert_eq!(
         therapy.extended,
         Extended::Running {
@@ -673,6 +679,15 @@ fn the_basal_cap_clamps_below_the_pump_maximum() {
     let mut run = Run::new(pump, &Blob::default());
     run.status();
     assert_eq!(basal_max(&run), BasalRate::from_milliunits_per_hour(10_000));
+}
+
+#[test]
+fn a_zero_basal_cap_is_a_literal_zero_ceiling() {
+    let mut pump = sim();
+    pump.settings.insert(setting::BASAL_RATE_CAP, 0);
+    let mut run = Run::new(pump, &Blob::default());
+    run.status();
+    assert_eq!(basal_max(&run), BasalRate::from_milliunits_per_hour(0));
 }
 
 #[test]

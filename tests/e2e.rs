@@ -1041,6 +1041,29 @@ fn a_temp_basal_decodes_started_while_running_then_ended() {
 }
 
 #[test]
+fn a_priming_record_decodes_its_amount_past_the_motion_and_force_fields() {
+    let mut run = Run::new(sim(), &Blob::default());
+    run.harness
+        .device
+        .events
+        .push(NOON as u32, 4, [1_500, 0x2307, 0x0001]);
+    let event = run.history(0).first().map(|entry| entry.event);
+    assert!(
+        matches!(
+            event,
+            Some(HistoryEvent::Bolus {
+                kind: BolusKind::Priming,
+                requested,
+                delivered,
+                in_progress: false,
+                ..
+            }) if requested == units(15_000) && delivered == units(15_000)
+        ),
+        "{event:?}"
+    );
+}
+
+#[test]
 fn a_combined_bolus_decodes_as_combined_not_extended() {
     let mut run = Run::new(sim(), &Blob::default());
     run.harness

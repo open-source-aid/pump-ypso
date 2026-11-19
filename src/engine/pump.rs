@@ -80,6 +80,11 @@ impl BolusState {
             return Err(Halt::Failed(Failure::Protocol));
         }
         let (delivered, total) = (pick(5), pick(9));
+        let (delivered, total) = if pick(30) > InsulinAmount::ZERO && total == InsulinAmount::ZERO {
+            (pick(26), pick(30))
+        } else {
+            (delivered, total)
+        };
         Ok(Self {
             running: running(bytes[0], delivered, total),
             delivered,
@@ -215,7 +220,7 @@ impl Ctx {
 
     async fn basal_limit(&self, id: u16) -> Step<Option<i32>> {
         match self.read_setting(id).await {
-            Ok(value) => Ok((value > 0).then_some(value)),
+            Ok(value) => Ok((value >= 0).then_some(value)),
             Err(Halt::Failed(Failure::Status(_))) => Ok(None),
             Err(other) => Err(other),
         }
@@ -416,6 +421,56 @@ mod tests {
         );
 
         assert_eq!(System::decode(&bytes[..14]).unwrap().remaining, None);
+    }
+
+    fn combined_bytes(immediate_total: i32, injected2: i32, total2: i32) -> alloc::vec::Vec<u8> {
+        let mut bytes = alloc::vec![1u8];
+        for value in [1, 30, immediate_total] {
+            bytes.extend(value.to_le_bytes());
+        }
+        bytes.push(1);
+        for value in [7, 50, 600, injected2, total2, 0, 60] {
+            bytes.extend(value.to_le_bytes());
+        }
+        with_crc16(bytes)
+    }
+
+    #[test]
+    fn a_combined_bolus_status_falls_back_to_the_second_immediate_pair() {
+        let milli = InsulinAmount::from_milliunits;
+        let taken = BolusState::decode(&combined_bytes(0, 100, 250), true).unwrap();
+        assert_eq!(taken.delivered, milli(1_000));
+        assert_eq!(taken.total, milli(2_500));
+        assert!(taken.running);
+        let kept = BolusState::decode(&combined_bytes(300, 100, 250), true).unwrap();
+        assert_eq!(kept.delivered, milli(300));
+        assert_eq!(kept.total, milli(3_000));
+    }
+
+    #[test]
+    fn the_basal_blackout_is_gated_on_the_control_version() {
+        use super::super::io::Shared;
+        use super::super::link::Versions;
+        use super::super::store::{tests::blob, Nonces, Session};
+        let session = Session::decode(&blob(|_| {})).unwrap();
+        let ctx = Ctx::new(
+            Shared::default(),
+            session,
+            Nonces::resume([7; 16], None),
+            0,
+            "ypso",
+        );
+        let versions = |control| Versions {
+            pump: 1.2,
+            master: alloc::string::String::new(),
+            history: 1.4,
+            control,
+        };
+        assert!(!ctx.avoid_window());
+        ctx.link.replace(Some(versions(1.2)));
+        assert!(ctx.avoid_window());
+        ctx.link.replace(Some(versions(1.3)));
+        assert!(!ctx.avoid_window());
     }
 
     #[test]

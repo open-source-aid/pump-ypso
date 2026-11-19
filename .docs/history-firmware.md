@@ -7,7 +7,7 @@ Amounts: the firmware converts motor steps with `round(steps / 6)` (`0x0804f388`
 | Type | Writer | Payload | Meaning |
 |---|---|---|---|
 | 23 daily total | `LOG_WriteDailyTotal` `0x0804a57c`, decoder `0x0804ad38` | `v0` = `u32` | insulin delivered that day, hundredths of U. Written when the date changes (`0x08024162`, on a SystemDate write, then `DATE_SET`), at the midnight rollover and on storage-mode shutdown; the accumulator is reset right after |
-| 4 priming finished | `LOG_WritePrimingDone` `0x0804a5ea`, decoder `0x0804adae` | `v0` bits 0-15 `u16`, bits 16-23 `u8`, bits 24-31 `u8`; `v1` bits 0-15 `i16` | bits 0-15 = amount primed, hundredths of U; the other fields are unidentified status values (keep in `raw`) |
+| 4 priming finished | `LOG_WritePrimingDone` `0x0804a5ea`, decoder `0x0804adae` | `v0` bits 0-15 `u16`, bits 16-23 `u8`, bits 24-31 + `v1` bits 0-7 `u16` | bits 0-15 = amount primed, hundredths of U; bits 16-23 = motion status (`u8`); the `u16` spanning `v0` bits 24-31 and `v1` bits 0-7 = priming force (raw × 128 / 1000 N). This differs from type 25, whose second and third fields are each a full `u16`. Only the amount is decoded; the rest stays in `raw` |
 | 25 cannula priming finished | `LOG_WriteCannulaPrimingDone` `0x0804a538` | `v0` bits 0-15 `u16`, bits 16-31 `u16`; `v1` bits 0-15 `i16` | bits 0-15 = amount primed into the cannula, hundredths of U; the others unidentified |
 | 5 bolus step changed | `LOG_WriteBolusStepChange` `0x0804a510` | `v0` bits 0-15 `u16` | the new bolus step, in the encoding of setting 3 |
 | 33 bolus amount cap changed | `LOG_WriteBolusAmountCapChange` `0x0804a3d0` | `v0` bits 0-15 `i16` new, bits 16-31 `i16` previous | written by the generic setting write for setting 112 (`0x0802435c`) |

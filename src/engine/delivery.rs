@@ -115,7 +115,7 @@ impl Ctx {
         if !allowed {
             return Ok(refused(Refusal::OutOfLimits));
         }
-        self.wait_window(true, None).await?;
+        self.wait_window(false, None).await?;
         self.wait_window(true, Some(duration)).await?;
         let cleared = self.system().await?.percent != 100;
         if cleared {

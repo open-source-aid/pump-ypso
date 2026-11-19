@@ -161,6 +161,7 @@ fn a_combined_bolus_front_loads_its_immediate_part() {
     assert_eq!(app.events(), [(17, [600, 100, 60])]);
     app.wait(8_700);
     assert_eq!(slow(&mut app), (1, vec![1, 101, 600, 100, 100, 0, 60]));
+    assert_eq!(immediate(&mut app), (0, vec![0, 0, 0]));
     app.wait(60 * MINUTE);
     assert_eq!(app.events(), [(18, [600, 100, 60])]);
     start(&mut app, bolus(600, 60, 100, 2));
