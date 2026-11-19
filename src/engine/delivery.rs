@@ -1,13 +1,14 @@
 use core::time::Duration;
 
 use pump_shared::{
-    BasalProfile, BasalRate, Event, Failure, InsulinAmount, Outcome, Percent, Refusal, Report,
-    TempBasalRate, Transition,
+    Approximation, BasalProfile, BasalRate, Event, Failure, InsulinAmount, Outcome, Percent,
+    Refusal, Report, TempBasalRate, Transition,
 };
 
 use super::commands::{done, refused, tbr, HOUR, IMMEDIATE, SLOW};
 use super::io;
 use super::link::{unknown, Ctx, Halt, Step, WriteClass};
+use super::pump::milli;
 use crate::protocol::setting;
 use crate::Characteristic;
 
@@ -16,6 +17,12 @@ const POLLS: usize = 450;
 const SETTLE: usize = 5;
 const COMMAND_FAILED: u8 = 0x87;
 const TBR_RUNNING: u8 = 0xB0;
+const MIN_EXTENDED: u32 = 100;
+const ZERO_RATE_EXTENSION: u64 = 15;
+const SLOW_STEP: u64 = 15;
+const STRETCH_LIMIT: u64 = 60;
+const STEP_ITERS: usize = 64;
+const TOLERANCE: u64 = 20;
 
 fn hundredths(amount: InsulinAmount) -> i32 {
     (amount.milliunits() / 10) as i32
@@ -23,6 +30,17 @@ fn hundredths(amount: InsulinAmount) -> i32 {
 
 fn minutes(duration: Duration) -> i32 {
     (duration.as_secs() / 60) as i32
+}
+
+fn within_tolerance(requested: u64, achieved: u64) -> bool {
+    requested.abs_diff(achieved).saturating_mul(TOLERANCE) <= requested
+}
+
+fn basal_approximation(requested: BasalRate, achieved: BasalRate) -> Outcome {
+    Outcome::Approximated(Approximation::Basal {
+        requested,
+        achieved,
+    })
 }
 
 impl Ctx {
@@ -96,7 +114,7 @@ impl Ctx {
             .borrow()
             .limits
             .allows_extended_bolus(amount, duration);
-        if !allowed || amount.milliunits() < 100 {
+        if !allowed || amount.milliunits() < MIN_EXTENDED {
             return Ok(refused(Refusal::OutOfLimits));
         }
         self.wait_window(true, None).await?;
@@ -115,8 +133,18 @@ impl Ctx {
         if !allowed {
             return Ok(refused(Refusal::OutOfLimits));
         }
+        self.set_percent_tbr(percent, duration, duration).await?;
+        Ok(done())
+    }
+
+    async fn set_percent_tbr(
+        &self,
+        percent: Percent,
+        pump_duration: Duration,
+        reported: Duration,
+    ) -> Step<()> {
         self.wait_window(false, None).await?;
-        self.wait_window(true, Some(duration)).await?;
+        self.wait_window(true, Some(pump_duration)).await?;
         let cleared = self.system().await?.percent != 100;
         if cleared {
             self.write(
@@ -129,15 +157,101 @@ impl Ctx {
         }
         let value = i32::from(percent.get());
         let after = |halt| if cleared { unknown(halt) } else { halt };
-        self.dose(Characteristic::StartStopTbr, &tbr(value, minutes(duration)))
-            .await
-            .map_err(after)?;
+        self.dose(
+            Characteristic::StartStopTbr,
+            &tbr(value, minutes(pump_duration)),
+        )
+        .await
+        .map_err(after)?;
         self.verify_percent(value).await.map_err(after)?;
         self.apply(Transition::TempBasalStarted {
             rate: TempBasalRate::Percent(percent),
-            duration,
+            duration: reported,
         });
-        Ok(done())
+        Ok(())
+    }
+
+    pub(super) async fn absolute_temp_basal(
+        &self,
+        requested: BasalRate,
+        duration: Duration,
+    ) -> Step<Outcome> {
+        let request = u64::from(requested.milliunits_per_hour());
+        if request == 0 {
+            return self.temp_basal(Percent::new(0), duration).await;
+        }
+        if let Some(scheduled) = self.scheduled_rate().await? {
+            if let Some(ideal) = requested.percent_of(scheduled) {
+                let cap = self
+                    .device
+                    .borrow()
+                    .limits
+                    .temp_basal_percent
+                    .as_ref()
+                    .map_or(0, |bounds| bounds.max.get());
+                let percent = ideal.get().min(cap);
+                let achieved = u64::from(scheduled.milliunits_per_hour())
+                    .saturating_mul(u64::from(percent))
+                    / 100;
+                if within_tolerance(request, achieved) {
+                    let rate = BasalRate::from_milliunits_per_hour(achieved as u32);
+                    return Ok(
+                        match self.temp_basal(Percent::new(percent), duration).await? {
+                            Outcome::Completed(_) if achieved == request => done(),
+                            Outcome::Completed(_) => basal_approximation(requested, rate),
+                            other => other,
+                        },
+                    );
+                }
+            }
+        }
+        if self.extended() {
+            let minutes = duration.as_secs() / 60;
+            let (amount, window) = self.plan_extended(requested, minutes);
+            let achieved = u64::from(amount.milliunits()).saturating_mul(60) / window;
+            if amount.milliunits() >= MIN_EXTENDED && within_tolerance(request, achieved) {
+                let ceiling = self.device.borrow().long_minutes;
+                let pump = (minutes + ZERO_RATE_EXTENSION).min(ceiling);
+                self.set_percent_tbr(Percent::new(0), Duration::from_secs(pump * 60), duration)
+                    .await?;
+                self.cancel_extended().await?;
+                self.extended_bolus(amount, Duration::from_secs(window * 60))
+                    .await?;
+                let rate = BasalRate::from_milliunits_per_hour(achieved as u32);
+                return Ok(basal_approximation(requested, rate));
+            }
+        }
+        Ok(refused(Refusal::OutOfLimits))
+    }
+
+    async fn scheduled_rate(&self) -> Step<Option<BasalRate>> {
+        let Some(slots) = self.active_profile().await? else {
+            return Ok(None);
+        };
+        let hour = (self.clock().await? / HOUR % 24) as usize;
+        Ok(Some(BasalRate::from_milliunits_per_hour(milli(
+            slots[hour],
+        ))))
+    }
+
+    fn plan_extended(&self, requested: BasalRate, minutes: u64) -> (InsulinAmount, u64) {
+        let bounds = self.device.borrow().limits.bolus.clone();
+        let request = u64::from(requested.milliunits_per_hour());
+        let over = |window: u64| request.saturating_mul(window) / 60;
+        let mut window = minutes.max(SLOW_STEP);
+        while over(window) < u64::from(MIN_EXTENDED) && window < STRETCH_LIMIT {
+            window += SLOW_STEP;
+        }
+        let ceiling = u64::from(bounds.max.milliunits());
+        let mut steps = 0;
+        while over(window) > ceiling && window > SLOW_STEP && steps < STEP_ITERS {
+            window -= SLOW_STEP;
+            steps += 1;
+        }
+        let target =
+            InsulinAmount::from_milliunits(u32::try_from(over(window)).unwrap_or(u32::MAX));
+        let amount = bounds.nearest(target).unwrap_or(bounds.min);
+        (amount, window)
     }
 
     pub(super) async fn set_profile(&self, profile: &BasalProfile) -> Step<Outcome> {

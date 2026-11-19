@@ -126,6 +126,13 @@ fn extended(milli: u32) -> Command {
     }
 }
 
+fn absolute(milli: u32) -> Command {
+    Command::TempBasal {
+        rate: TempBasalRate::Absolute(BasalRate::from_milliunits_per_hour(milli)),
+        duration: Duration::from_secs(1800),
+    }
+}
+
 fn entry(kind: u8, index: u16) -> Vec<u8> {
     let mut bytes = 0u32.to_le_bytes().to_vec();
     bytes.push(kind);
@@ -735,6 +742,15 @@ fn a_temp_basal_the_pump_reports_already_running_is_busy() {
     run.status();
     run.harness.device.refuse = Some((uuids::START_STOP_TBR, 0xB0));
     assert_eq!(run.run(tbr(150)), Outcome::Refused(Refusal::Busy));
+}
+
+#[cfg(feature = "delivery")]
+#[test]
+fn an_unconfirmed_absolute_temp_basal_is_unknown() {
+    let mut run = Run::new(pump(), &Blob::default());
+    run.status();
+    run.harness.device.deaf = true;
+    assert_eq!(run.run(absolute(3_000)), Outcome::Unknown);
 }
 
 #[cfg(feature = "delivery")]

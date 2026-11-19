@@ -2,9 +2,11 @@ use alloc::boxed::Box;
 use alloc::vec::Vec;
 use core::time::Duration;
 
+#[cfg(feature = "delivery")]
+use pump_shared::TempBasalRate;
 use pump_shared::{
     BasalProfile, BasalRate, BasalSegment, Command, DeviceInfo, Event, Failure, Outcome,
-    PumpStatus, PumpTime, Refusal, Report, Sequence, TempBasalRate, TherapyState, Transition,
+    PumpStatus, PumpTime, Refusal, Report, Sequence, TherapyState, Transition,
 };
 
 use super::crc::with_crc16;
@@ -114,6 +116,10 @@ impl Ctx {
             Plan::Extended(amount, duration) => return self.extended_bolus(amount, duration).await,
             #[cfg(feature = "delivery")]
             Plan::TempBasal(percent, duration) => return self.temp_basal(percent, duration).await,
+            #[cfg(feature = "delivery")]
+            Plan::TempBasalAbsolute(rate, duration) => {
+                return self.absolute_temp_basal(rate, duration).await
+            }
             #[cfg(feature = "delivery")]
             Plan::SetProfile(profile) => return self.set_profile(&profile).await,
         };
@@ -263,6 +269,8 @@ enum Plan {
     #[cfg(feature = "delivery")]
     TempBasal(pump_shared::Percent, Duration),
     #[cfg(feature = "delivery")]
+    TempBasalAbsolute(pump_shared::BasalRate, Duration),
+    #[cfg(feature = "delivery")]
     SetProfile(BasalProfile),
 }
 
@@ -279,6 +287,11 @@ impl Plan {
             #[cfg(feature = "delivery")]
             Self::TempBasal(percent, duration) => Command::TempBasal {
                 rate: TempBasalRate::Percent(*percent),
+                duration: *duration,
+            },
+            #[cfg(feature = "delivery")]
+            Self::TempBasalAbsolute(rate, duration) => Command::TempBasal {
+                rate: TempBasalRate::Absolute(*rate),
                 duration: *duration,
             },
             #[cfg(feature = "delivery")]
@@ -300,10 +313,6 @@ fn plan(command: Command) -> Result<Plan, Refusal> {
         Command::CancelTempBasal => Plan::CancelTempBasal,
         Command::TempBasal { rate, .. } if rate.is_neutral() => Plan::CancelTempBasal,
         Command::CancelExtendedBolus => Plan::CancelExtended,
-        Command::TempBasal {
-            rate: TempBasalRate::Absolute(_),
-            ..
-        } => return Err(Refusal::Unsupported),
         #[cfg(feature = "delivery")]
         Command::Bolus { amount } => Plan::Bolus(amount),
         #[cfg(feature = "delivery")]
@@ -313,6 +322,11 @@ fn plan(command: Command) -> Result<Plan, Refusal> {
             rate: TempBasalRate::Percent(percent),
             duration,
         } => Plan::TempBasal(percent, duration),
+        #[cfg(feature = "delivery")]
+        Command::TempBasal {
+            rate: TempBasalRate::Absolute(rate),
+            duration,
+        } => Plan::TempBasalAbsolute(rate, duration),
         #[cfg(feature = "delivery")]
         Command::SetBasalProfile { profile } => Plan::SetProfile(profile),
         #[cfg(not(feature = "delivery"))]

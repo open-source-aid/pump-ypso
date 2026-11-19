@@ -10,10 +10,10 @@ use std::time::Duration;
 
 use e2e_support::*;
 use pump_shared::{
-    Action, Alarm, AlarmKind, Basal, BasalProfile, BasalRate, BasalSegment, BleOp, BleResult,
-    BolusKind, Command, CommandId, Completion, Component, EngineState, Event, Extended, Failure,
-    HistoryEvent, LimitChange, Notification, Outcome, Percent, PumpMode, PumpTime, Refusal, Report,
-    Sequence, Slot, TempBasalPhase, TempBasalRate, UtcTime,
+    Action, Alarm, AlarmKind, Approximation, Basal, BasalProfile, BasalRate, BasalSegment, BleOp,
+    BleResult, BolusKind, Command, CommandId, Completion, Component, EngineState, Event, Extended,
+    Failure, HistoryEvent, LimitChange, Notification, Outcome, Percent, PumpMode, PumpTime,
+    Refusal, Report, Sequence, Slot, TempBasalPhase, TempBasalRate, UtcTime,
 };
 use pump_ypso::protocol::{setting, uuids};
 use pump_ypso::sim::{Log, YpsoSim, BOLUS_AMOUNT_CAP};
@@ -250,11 +250,208 @@ fn sets_and_cancels_a_temp_basal() {
         assert_eq!(run.run(refused), Outcome::Refused(Refusal::OutOfLimits));
     }
     assert_eq!(
-        run.run(Command::TempBasal {
-            rate: TempBasalRate::Absolute(BasalRate::from_milliunits_per_hour(1_000)),
+        run.run(absolute(1_200, HALF_HOUR)),
+        Outcome::Completed(Report::Done)
+    );
+    assert_eq!(run.status().therapy.basal, running(150));
+}
+
+fn absolute(milli: u32, duration: Duration) -> Command {
+    Command::TempBasal {
+        rate: TempBasalRate::Absolute(BasalRate::from_milliunits_per_hour(milli)),
+        duration,
+    }
+}
+
+fn approx_basal(requested: u32, achieved: u32) -> Outcome {
+    Outcome::Approximated(Approximation::Basal {
+        requested: BasalRate::from_milliunits_per_hour(requested),
+        achieved: BasalRate::from_milliunits_per_hour(achieved),
+    })
+}
+
+fn suspended(duration: Duration) -> Basal {
+    Basal::Temporary {
+        rate: TempBasalRate::Percent(Percent::new(0)),
+        duration,
+    }
+}
+
+#[cfg(feature = "delivery")]
+#[test]
+fn delivers_an_absolute_temp_basal() {
+    let mut run = Run::new(sim(), &Blob::default());
+    run.status();
+    assert_eq!(
+        run.run(absolute(1_200, HALF_HOUR)),
+        Outcome::Completed(Report::Done)
+    );
+    assert_eq!(
+        run.status().therapy.basal,
+        Basal::Temporary {
+            rate: TempBasalRate::Percent(Percent::new(150)),
             duration: HALF_HOUR,
-        }),
-        Outcome::Refused(Refusal::Unsupported)
+        }
+    );
+    assert_eq!(
+        run.run(Command::CancelTempBasal),
+        Outcome::Completed(Report::Done)
+    );
+    assert_eq!(run.run(absolute(820, HALF_HOUR)), approx_basal(820, 824));
+    assert_eq!(
+        run.run(Command::CancelTempBasal),
+        Outcome::Completed(Report::Done)
+    );
+    assert_eq!(
+        run.run(absolute(0, HALF_HOUR)),
+        Outcome::Completed(Report::Done)
+    );
+    assert_eq!(run.status().therapy.basal, suspended(HALF_HOUR));
+    assert_eq!(
+        run.run(Command::CancelTempBasal),
+        Outcome::Completed(Report::Done)
+    );
+    assert_eq!(
+        run.run(absolute(1_200, Duration::from_secs(20 * 60))),
+        Outcome::Refused(Refusal::OutOfLimits)
+    );
+    assert_eq!(
+        run.run(absolute(3_000, HALF_HOUR)),
+        approx_basal(3_000, 3_000)
+    );
+    let therapy = run.status().therapy;
+    assert_eq!(therapy.basal, suspended(HALF_HOUR));
+    assert_eq!(
+        therapy.extended,
+        Extended::Running {
+            amount: units(1_500),
+            duration: HALF_HOUR,
+        }
+    );
+    assert_eq!(
+        run.run(Command::CancelExtendedBolus),
+        Outcome::Completed(Report::Done)
+    );
+    assert_eq!(
+        run.run(Command::CancelTempBasal),
+        Outcome::Completed(Report::Done)
+    );
+    assert_eq!(
+        run.run(absolute(60_000, HOUR)),
+        approx_basal(60_000, 60_000)
+    );
+    assert_eq!(
+        run.status().therapy.extended,
+        Extended::Running {
+            amount: units(15_000),
+            duration: Duration::from_secs(15 * 60),
+        }
+    );
+    assert_eq!(
+        run.run(Command::CancelExtendedBolus),
+        Outcome::Completed(Report::Done)
+    );
+    assert_eq!(
+        run.run(Command::CancelTempBasal),
+        Outcome::Completed(Report::Done)
+    );
+    assert_eq!(
+        run.run(absolute(200_000, HALF_HOUR)),
+        Outcome::Refused(Refusal::OutOfLimits)
+    );
+    assert_eq!(
+        run.run(absolute(101_000, Duration::from_secs(15 * 60))),
+        approx_basal(101_000, 100_000)
+    );
+    assert_eq!(
+        run.run(Command::CancelExtendedBolus),
+        Outcome::Completed(Report::Done)
+    );
+    assert_eq!(
+        run.run(Command::CancelTempBasal),
+        Outcome::Completed(Report::Done)
+    );
+    assert_eq!(
+        run.run(absolute(60_000, Duration::from_secs(1_000_000_000_000))),
+        Outcome::Refused(Refusal::OutOfLimits)
+    );
+}
+
+#[cfg(feature = "delivery")]
+#[test]
+fn an_absolute_temp_basal_emulates_low_rates_and_a_zero_schedule() {
+    let mut pump = sim();
+    pump.settings.insert(setting::basal_a(12), 0);
+    let mut run = Run::new(pump, &Blob::default());
+    run.status();
+    assert_eq!(
+        run.run(absolute(1_000, HALF_HOUR)),
+        approx_basal(1_000, 1_000)
+    );
+    assert_eq!(
+        run.run(Command::CancelExtendedBolus),
+        Outcome::Completed(Report::Done)
+    );
+    assert_eq!(
+        run.run(Command::CancelTempBasal),
+        Outcome::Completed(Report::Done)
+    );
+    assert_eq!(run.run(absolute(100, HALF_HOUR)), approx_basal(100, 100));
+    assert_eq!(
+        run.status().therapy.extended,
+        Extended::Running {
+            amount: units(100),
+            duration: HOUR,
+        }
+    );
+    assert_eq!(
+        run.run(Command::CancelExtendedBolus),
+        Outcome::Completed(Report::Done)
+    );
+    assert_eq!(
+        run.run(Command::CancelTempBasal),
+        Outcome::Completed(Report::Done)
+    );
+    assert_eq!(
+        run.run(absolute(50, HALF_HOUR)),
+        Outcome::Refused(Refusal::OutOfLimits)
+    );
+    run.harness
+        .device
+        .settings
+        .insert(setting::BASAL_PROFILE_SELECTION, 4);
+    assert_eq!(
+        run.run(absolute(1_000, HALF_HOUR)),
+        approx_basal(1_000, 1_000)
+    );
+    assert_eq!(
+        run.run(Command::CancelExtendedBolus),
+        Outcome::Completed(Report::Done)
+    );
+    assert_eq!(
+        run.run(Command::CancelTempBasal),
+        Outcome::Completed(Report::Done)
+    );
+}
+
+#[cfg(all(feature = "delivery", feature = "opn"))]
+#[test]
+fn an_absolute_temp_basal_without_the_extended_bolus_is_percent_only() {
+    let mut pump = opn();
+    pump.versions.pump_base = "1.0".into();
+    let mut run = Run::new(pump, &Blob::opn());
+    run.status();
+    assert_eq!(
+        run.run(absolute(1_200, HALF_HOUR)),
+        Outcome::Completed(Report::Done)
+    );
+    assert_eq!(
+        run.run(Command::CancelTempBasal),
+        Outcome::Completed(Report::Done)
+    );
+    assert_eq!(
+        run.run(absolute(3_000, HALF_HOUR)),
+        Outcome::Refused(Refusal::OutOfLimits)
     );
 }
 
@@ -1149,6 +1346,8 @@ fn acts() -> Vec<(Prepare, Act)> {
             )
         }),
         (read_status, |r| submit(r, temp_basal(150, HALF_HOUR))),
+        (read_status, |r| submit(r, absolute(1_200, HALF_HOUR))),
+        (read_status, |r| submit(r, absolute(3_000, HALF_HOUR))),
         (start_temp_basal, |r| submit(r, temp_basal(150, HALF_HOUR))),
         (nothing, |r| submit(r, Command::CancelTempBasal)),
         (status_and_history, |r| {
