@@ -1427,3 +1427,270 @@ fn every_command_survives_timeouts_on_an_older_control_service() {
         Fault::BleTimeout,
     );
 }
+
+#[cfg(feature = "delivery")]
+fn rate_run() -> Run<YpsoSim> {
+    let mut device = sim();
+    device.settings.insert(setting::BOLUS_STEP_SELECTION, 10);
+    let mut run = Run::new(device, &Blob::default());
+    run.status();
+    run
+}
+
+#[cfg(feature = "delivery")]
+fn immediate_count(sim: &YpsoSim) -> usize {
+    sim.events.entries.iter().filter(|e| e.kind == 2).count()
+}
+
+#[cfg(feature = "delivery")]
+fn delivered_hundredths(sim: &YpsoSim) -> u64 {
+    sim.events
+        .entries
+        .iter()
+        .filter(|e| e.kind == 2)
+        .map(|e| u64::from(e.values[0]))
+        .sum()
+}
+
+#[cfg(feature = "delivery")]
+fn marker_offset(sim: &YpsoSim) -> Option<u64> {
+    let seconds: Vec<u64> = sim
+        .events
+        .entries
+        .iter()
+        .rev()
+        .filter(|e| e.kind == 13)
+        .map(|e| u64::from(e.values[2]))
+        .collect();
+    match seconds.as_slice() {
+        [newer, older, ..] => Some((newer + 60 - older) % 60),
+        _ => None,
+    }
+}
+
+#[cfg(feature = "delivery")]
+fn rate_bolus(milli: u32, seconds: u64) -> Command {
+    Command::RateBolus {
+        amount: units(milli),
+        duration: Duration::from_secs(seconds),
+    }
+}
+
+#[cfg(feature = "delivery")]
+#[test]
+fn a_rate_bolus_spreads_a_clean_sequence_and_marks_it() {
+    let mut run = rate_run();
+    assert_eq!(
+        run.run(rate_bolus(1_000, 180)),
+        Outcome::Completed(Report::Delivered(units(1_000)))
+    );
+    let sim = &run.harness.device;
+    assert_eq!(immediate_count(sim), 10);
+    assert_eq!(delivered_hundredths(sim), 100);
+    assert_eq!(marker_offset(sim), Some(100 % 59));
+    assert_eq!(run.engine.therapy().bolus, pump_shared::Bolus::Idle);
+}
+
+#[cfg(feature = "delivery")]
+#[test]
+fn a_rate_bolus_coarsens_and_marks_a_multiple_of_the_modulus() {
+    let mut run = rate_run();
+    assert_eq!(
+        run.run(rate_bolus(5_900, 200)),
+        Outcome::Completed(Report::Delivered(units(5_900)))
+    );
+    let sim = &run.harness.device;
+    assert_eq!(immediate_count(sim), 10);
+    assert_eq!(delivered_hundredths(sim), 590);
+    assert_eq!(590 % 59, 0);
+    assert_eq!(marker_offset(sim), Some(0));
+}
+
+#[cfg(feature = "delivery")]
+#[test]
+fn a_rate_bolus_off_the_step_grid_is_approximated() {
+    let mut run = rate_run();
+    assert_eq!(
+        run.run(rate_bolus(250, 180)),
+        Outcome::Approximated(Approximation::Bolus {
+            requested: units(250),
+            delivered: units(200),
+            duration: Duration::from_secs(180),
+        })
+    );
+    let sim = &run.harness.device;
+    assert_eq!(immediate_count(sim), 2);
+    assert_eq!(delivered_hundredths(sim), 20);
+    assert_eq!(marker_offset(sim), Some(20));
+}
+
+#[cfg(feature = "delivery")]
+#[test]
+fn a_single_step_rate_bolus_near_midnight_offsets_the_clock() {
+    let mut device = sim();
+    device.settings.insert(setting::BOLUS_STEP_SELECTION, 10);
+    device.clock = 9497 * 86_400 + 23 * 3_600 + 59 * 60;
+    let mut run = Run::new(device, &Blob::default());
+    run.status();
+    assert_eq!(
+        run.run(rate_bolus(100, 5)),
+        Outcome::Completed(Report::Delivered(units(100)))
+    );
+    let sim = &run.harness.device;
+    assert_eq!(immediate_count(sim), 1);
+    assert_eq!(marker_offset(sim), Some(10));
+    assert!(!sim
+        .events
+        .entries
+        .iter()
+        .any(|e| e.kind == 12 || e.kind == 23));
+}
+
+#[cfg(feature = "delivery")]
+#[test]
+fn a_rate_bolus_too_fast_is_out_of_limits() {
+    let mut run = rate_run();
+    assert_eq!(
+        run.run(rate_bolus(1_000, 5)),
+        Outcome::Refused(Refusal::OutOfLimits)
+    );
+    assert_eq!(immediate_count(&run.harness.device), 0);
+}
+
+#[cfg(feature = "delivery")]
+#[test]
+fn a_rate_bolus_of_too_many_micro_boluses_is_out_of_limits() {
+    let mut device = sim();
+    device.settings.insert(setting::BOLUS_STEP_SELECTION, 5);
+    device.settings.insert(BOLUS_AMOUNT_CAP, 2_500);
+    let mut run = Run::new(device, &Blob::default());
+    run.status();
+    assert_eq!(
+        run.run(rate_bolus(25_000, 100_000)),
+        Outcome::Refused(Refusal::OutOfLimits)
+    );
+    assert_eq!(immediate_count(&run.harness.device), 0);
+}
+
+#[cfg(feature = "delivery")]
+#[test]
+fn an_out_of_range_rate_bolus_is_out_of_limits() {
+    let mut run = rate_run();
+    assert_eq!(
+        run.run(rate_bolus(50, 180)),
+        Outcome::Refused(Refusal::OutOfLimits)
+    );
+    assert_eq!(
+        run.run(rate_bolus(30_000, 180)),
+        Outcome::Refused(Refusal::OutOfLimits)
+    );
+    assert_eq!(immediate_count(&run.harness.device), 0);
+}
+
+#[cfg(feature = "delivery")]
+#[test]
+fn stop_preempts_a_rate_bolus_without_double_delivery() {
+    let mut run = rate_run();
+    let id = run.engine.submit(rate_bolus(500, 600)).unwrap();
+    run.harness
+        .advance(run.engine.as_mut(), Duration::from_secs(5))
+        .unwrap();
+    let stop = run.engine.stop();
+    run.settle();
+    assert_eq!(run.outcome(id), Some(Outcome::Unknown));
+    assert_eq!(run.outcome(stop), Some(Outcome::Completed(Report::Done)));
+    let sim = &run.harness.device;
+    let delivered = delivered_hundredths(sim);
+    assert!(delivered > 0 && delivered < 50, "{delivered}");
+    assert_eq!(marker_offset(sim), None);
+}
+
+#[cfg(feature = "delivery")]
+#[test]
+fn a_slow_rate_bolus_waits_between_micro_boluses() {
+    let mut run = rate_run();
+    assert_eq!(
+        run.run(rate_bolus(200, 2_000)),
+        Outcome::Completed(Report::Delivered(units(200)))
+    );
+    let sim = &run.harness.device;
+    assert_eq!(immediate_count(sim), 2);
+    assert_eq!(marker_offset(sim), Some(20));
+}
+
+#[cfg(feature = "delivery")]
+fn a_rate_bolus_survives_a_fault_at_every_step(fault: Fault) {
+    let mut step = 1;
+    loop {
+        let mut run = rate_run();
+        let before = run.harness.transcript.len();
+        run.harness.faults.insert(before + step, fault);
+        let outcome = run.run(rate_bolus(200, 180));
+        if run.harness.transcript.len() < before + step {
+            assert!(completed(outcome.clone()), "{outcome:?}");
+            break;
+        }
+        assert!(
+            matches!(
+                outcome,
+                Outcome::Failed(_)
+                    | Outcome::Unknown
+                    | Outcome::Completed(_)
+                    | Outcome::Approximated(_)
+            ),
+            "step {step}: {outcome:?}"
+        );
+        let again = run.run(Command::Status);
+        assert!(completed(again.clone()), "step {step}: {again:?}");
+        step += 1;
+    }
+    assert!(step > 10);
+}
+
+#[cfg(feature = "delivery")]
+#[test]
+fn a_rate_bolus_that_cannot_reread_after_a_drop_is_unknown() {
+    let mut run = rate_run();
+    let id = run.engine.submit(rate_bolus(200, 180)).unwrap();
+    let mut injected = 0;
+    while let Some(action) = run.engine.poll_action() {
+        run.harness.transcript.push(format!("{action:?}"));
+        let completion = match &action {
+            Action::Ble {
+                op: BleOp::Write { characteristic, .. },
+                ..
+            } if *characteristic == uuids::START_STOP_BOLUS && injected == 0 => {
+                injected = 1;
+                Completion::Ble(BleResult::Disconnected)
+            }
+            Action::Ble { .. } if injected == 1 => {
+                injected = 2;
+                Completion::Ble(BleResult::Disconnected)
+            }
+            Action::Store { .. } => Completion::Stored,
+            Action::Ble { op, .. } => {
+                Completion::Ble(run.harness.device.handle(op, run.harness.now))
+            }
+            other => panic!("{other:?}"),
+        };
+        run.engine
+            .handle_completion(action.id(), completion)
+            .unwrap();
+    }
+    assert_eq!(injected, 2);
+    run.settle();
+    assert_eq!(run.outcome(id), Some(Outcome::Unknown));
+    assert_eq!(immediate_count(&run.harness.device), 0);
+}
+
+#[cfg(feature = "delivery")]
+#[test]
+fn a_rate_bolus_survives_a_disconnect_at_every_step() {
+    a_rate_bolus_survives_a_fault_at_every_step(Fault::BleDisconnected);
+}
+
+#[cfg(feature = "delivery")]
+#[test]
+fn a_rate_bolus_survives_a_rejected_write_at_every_step() {
+    a_rate_bolus_survives_a_fault_at_every_step(Fault::BleStatus(0x87));
+}

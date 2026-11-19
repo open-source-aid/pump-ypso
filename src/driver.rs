@@ -92,6 +92,8 @@ static INFO: DriverInfo = DriverInfo {
         #[cfg(feature = "delivery")]
         CommandKind::Bolus,
         #[cfg(feature = "delivery")]
+        CommandKind::RateBolus,
+        #[cfg(feature = "delivery")]
         CommandKind::TempBasal,
         CommandKind::CancelTempBasal,
         #[cfg(feature = "delivery")]

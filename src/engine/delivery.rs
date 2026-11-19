@@ -15,6 +15,71 @@ use crate::Characteristic;
 const POLL: Duration = Duration::from_secs(2);
 const POLLS: usize = 450;
 const SETTLE: usize = 5;
+const DAY: u64 = HOUR * 24;
+const MINUTE: u64 = 60;
+const DT_MIN: Duration = Duration::from_secs(18);
+const MAX_MICRO: u64 = 256;
+const MARKER_MOD: u64 = 59;
+
+struct Schedule {
+    ticks: u64,
+    per_tick: u64,
+    steps: u64,
+    step: u32,
+    dt_ms: u64,
+}
+
+impl Schedule {
+    fn amount_at(&self, tick: u64) -> InsulinAmount {
+        let done = tick.saturating_mul(self.per_tick);
+        let steps = self.steps.saturating_sub(done).min(self.per_tick);
+        InsulinAmount::from_milliunits((steps as u32).saturating_mul(self.step))
+    }
+}
+
+fn plan_micro(
+    bolus: &pump_shared::Bounds<InsulinAmount>,
+    amount: InsulinAmount,
+    duration: Duration,
+) -> Option<Schedule> {
+    let step = bolus.min.milliunits();
+    if step == 0 || amount < bolus.min || amount > bolus.max {
+        return None;
+    }
+    let steps = u64::from(bolus.nearest(amount).unwrap_or(bolus.min).milliunits() / step);
+    let cap = duration.as_secs() / DT_MIN.as_secs();
+    let (ticks, per_tick) = if steps == 1 || steps <= cap {
+        (steps, 1)
+    } else if cap >= 2 {
+        let per_tick = steps.div_ceil(cap);
+        (steps.div_ceil(per_tick), per_tick)
+    } else {
+        return None;
+    };
+    if ticks > MAX_MICRO {
+        return None;
+    }
+    let dt_ms = duration.as_secs().saturating_mul(1_000) / ticks;
+    Some(Schedule {
+        ticks,
+        per_tick,
+        steps,
+        step,
+        dt_ms,
+    })
+}
+
+fn completed_or(requested: InsulinAmount, delivered: InsulinAmount, duration: Duration) -> Outcome {
+    if delivered == requested {
+        Outcome::Completed(Report::Delivered(delivered))
+    } else {
+        Outcome::Approximated(Approximation::Bolus {
+            requested,
+            delivered,
+            duration,
+        })
+    }
+}
 const COMMAND_FAILED: u8 = 0x87;
 const TBR_RUNNING: u8 = 0xB0;
 const MIN_EXTENDED: u32 = 100;
@@ -99,6 +164,89 @@ impl Ctx {
             io::sleep(&self.io, POLL).await;
         }
         Ok(Outcome::Unknown)
+    }
+
+    pub(super) async fn rate_bolus(
+        &self,
+        amount: InsulinAmount,
+        duration: Duration,
+    ) -> Step<Outcome> {
+        let Some(schedule) = plan_micro(&self.device.borrow().limits.bolus, amount, duration)
+        else {
+            return Ok(refused(Refusal::OutOfLimits));
+        };
+        let start = self.newest_sequence().await?;
+        let origin = self.io.borrow().now.as_millis();
+        for tick in 0..schedule.ticks {
+            let due = origin.saturating_add(tick.saturating_mul(schedule.dt_ms));
+            let now = self.io.borrow().now.as_millis();
+            if due > now {
+                io::sleep(&self.io, Duration::from_millis(due - now)).await;
+            }
+            if self.micro(schedule.amount_at(tick)).await.is_err() {
+                return Ok(match self.replay(start).await {
+                    Ok((delivered, _)) => completed_or(amount, delivered, duration),
+                    Err(_) => Outcome::Unknown,
+                });
+            }
+        }
+        let (delivered, _) = self.replay(start).await?;
+        let offset = u64::from(delivered.milliunits() / 10) % MARKER_MOD;
+        let marked = self.write_marker(offset).await?;
+        let (confirmed, marker) = self.replay(start).await?;
+        if marked && confirmed == delivered && marker == Some(offset) {
+            Ok(completed_or(amount, confirmed, duration))
+        } else {
+            Ok(Outcome::Unknown)
+        }
+    }
+
+    async fn micro(&self, amount: InsulinAmount) -> Step<()> {
+        self.wait_window(true, None).await?;
+        let payload = self.bolus_payload(hundredths(amount), 0, IMMEDIATE);
+        self.dose(Characteristic::StartStopBolus, &payload).await?;
+        self.apply(Transition::BolusStarted { requested: amount });
+        for _ in 0..POLLS {
+            io::sleep(&self.io, POLL).await;
+            let Ok(state) = self.bolus_state().await else {
+                break;
+            };
+            self.apply(Transition::BolusProgressed {
+                delivered: state.delivered,
+            });
+            self.emit(Event::Progress {
+                id: self.current.get(),
+                delivered: state.delivered,
+                requested: amount,
+            });
+            if !state.running {
+                break;
+            }
+        }
+        self.apply(Transition::BolusEnded);
+        Ok(())
+    }
+
+    async fn write_marker(&self, offset: u64) -> Step<bool> {
+        let now = self.clock().await?;
+        let now = if now % MINUTE < offset {
+            io::sleep(&self.io, Duration::from_secs(offset - now % MINUTE)).await;
+            self.clock().await?
+        } else {
+            now
+        };
+        for target in [now - offset, now] {
+            let of_day = target % DAY;
+            let time = [of_day / 3600, of_day / 60 % 60, of_day % 60].map(|v| v as u8);
+            if self
+                .write(Characteristic::SystemTime, WriteClass::Clock, &time)
+                .await
+                .is_err()
+            {
+                return Ok(false);
+            }
+        }
+        Ok(true)
     }
 
     pub(super) async fn extended_bolus(

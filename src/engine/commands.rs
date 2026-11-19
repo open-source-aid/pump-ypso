@@ -113,6 +113,8 @@ impl Ctx {
             #[cfg(feature = "delivery")]
             Plan::Bolus(amount) => return self.bolus(amount).await,
             #[cfg(feature = "delivery")]
+            Plan::RateBolus(amount, duration) => return self.rate_bolus(amount, duration).await,
+            #[cfg(feature = "delivery")]
             Plan::Extended(amount, duration) => return self.extended_bolus(amount, duration).await,
             #[cfg(feature = "delivery")]
             Plan::TempBasal(percent, duration) => return self.temp_basal(percent, duration).await,
@@ -265,6 +267,8 @@ enum Plan {
     #[cfg(feature = "delivery")]
     Bolus(pump_shared::InsulinAmount),
     #[cfg(feature = "delivery")]
+    RateBolus(pump_shared::InsulinAmount, Duration),
+    #[cfg(feature = "delivery")]
     Extended(pump_shared::InsulinAmount, Duration),
     #[cfg(feature = "delivery")]
     TempBasal(pump_shared::Percent, Duration),
@@ -279,6 +283,11 @@ impl Plan {
         match self {
             #[cfg(feature = "delivery")]
             Self::Bolus(amount) => Command::Bolus { amount: *amount },
+            #[cfg(feature = "delivery")]
+            Self::RateBolus(amount, duration) => Command::RateBolus {
+                amount: *amount,
+                duration: *duration,
+            },
             #[cfg(feature = "delivery")]
             Self::Extended(amount, duration) => Command::ExtendedBolus {
                 amount: *amount,
@@ -316,6 +325,8 @@ fn plan(command: Command) -> Result<Plan, Refusal> {
         #[cfg(feature = "delivery")]
         Command::Bolus { amount } => Plan::Bolus(amount),
         #[cfg(feature = "delivery")]
+        Command::RateBolus { amount, duration } => Plan::RateBolus(amount, duration),
+        #[cfg(feature = "delivery")]
         Command::ExtendedBolus { amount, duration } => Plan::Extended(amount, duration),
         #[cfg(feature = "delivery")]
         Command::TempBasal {
@@ -331,6 +342,7 @@ fn plan(command: Command) -> Result<Plan, Refusal> {
         Command::SetBasalProfile { profile } => Plan::SetProfile(profile),
         #[cfg(not(feature = "delivery"))]
         Command::Bolus { .. }
+        | Command::RateBolus { .. }
         | Command::ExtendedBolus { .. }
         | Command::TempBasal { .. }
         | Command::SetBasalProfile { .. } => return Err(Refusal::NotBuilt),

@@ -174,6 +174,12 @@ fn clock_step(raw: &Raw) -> Option<i64> {
     }
 }
 
+#[cfg(feature = "delivery")]
+fn time_second(raw: &Raw) -> Option<u64> {
+    let [hour, minute, second] = raw.values;
+    (raw.kind == 13 && hour <= 23 && minute <= 59 && second <= 59).then_some(u64::from(second))
+}
+
 fn running(raw: &Raw) -> bool {
     matches!(
         event(raw),
@@ -317,6 +323,32 @@ impl Ctx {
             Some(Ok(raw)) => raw.sequence,
             _ => 0,
         })
+    }
+
+    #[cfg(feature = "delivery")]
+    pub(crate) async fn replay(&self, after: u32) -> Step<(InsulinAmount, Option<u64>)> {
+        let (raws, _) = self.walk(Log::Event, |raw| raw.sequence <= after).await?;
+        let mut delivered = 0u32;
+        let mut seconds: Vec<u64> = Vec::new();
+        for raw in &raws {
+            if let Some(HistoryEvent::Bolus {
+                kind: BolusKind::Normal,
+                delivered: step,
+                in_progress: false,
+                ..
+            }) = event(raw)
+            {
+                delivered = delivered.saturating_add(step.milliunits());
+            }
+            if let Some(second) = time_second(raw) {
+                seconds.push(second);
+            }
+        }
+        let offset = match seconds.as_slice() {
+            [newer, older, ..] => Some((newer + 60 - older) % 60),
+            _ => None,
+        };
+        Ok((InsulinAmount::from_milliunits(delivered), offset))
     }
 
     #[cfg(feature = "delivery")]
