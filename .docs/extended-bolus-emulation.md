@@ -54,3 +54,19 @@ Every calculation here is dose-affecting, so:
 - Recovery tested with a crash/disconnect at every step of a sequence; the reported dose must equal exactly what the history records.
 - A `YpsoSim` case for every path and every pump status code; 100% coverage kept.
 
+## Absolute temp basal: the Lotus model (owner decision, 2026-11-19)
+
+Cross-checked against the owner's other Ypso driver (Lotus, Kotlin, `Nascence-Biomed/Lotus-Pump-Driver-Ypso`), which is authoritative on application semantics. Chosen strategy for an absolute rate, in order:
+1. **Within ~5% of a representable percent:** native percent TBR. `percent = 100*rate/scheduled`, clamped to the pump's percent cap; if `percent/clamped < 1.05` use it as-is.
+2. **Otherwise (and profile rate zero):** suspend and deliver the whole dose as one native extended bolus. Set a 0% TBR for the duration (+15 min, `ZERO_RATE_EXTENSION`, to dodge end-of-temp warnings; report the un-extended duration), cancel any running slow bolus, then one native extended bolus of `insulin = rate*duration/60`. Stretch/shrink the bolus duration in 15-min steps to keep the amount within [min bolus, max bolus] (Lotus `limitAbsoluteTBR`). This covers any rate incl. profile-zero and never double-counts base basal.
+3. If even that cannot represent the rate within tolerance: `Outcome::Approximated` when close, else `Refused(OutOfLimits)`.
+Native extended bolus needs `ver_control > 1.1`; without it, percent TBR only.
+Do NOT use the Rockit additive "boost" (max% + extended for the excess): the Lotus suspend-and-full-extended model is simpler and avoids base-basal double-count. Report the result flagged as emulated (`Outcome::Approximated`), so the loop treats the extended bolus as basal.
+
+## Lotus-confirmed constants and gotchas
+- **Basal blackout wait is version-gated:** avoid-window only when `ver_control < 1.3`; window = 8 s before + 6 s after each 3-min boundary (~14 s / 180 s). Bolus-window wait is always on. (Fixes our unconditional TBR blackout wait.)
+- **Clock marker is real and benign:** Lotus already does a backward-then-forward `SystemTime` nudge (second-1 then second) after a bolus (`twiddleClock`), within the same minute. Validates our clock-CRC marker; keep it within the minute, away from the basal/date windows.
+- **Sub-bolus spacing observed:** ~2.5 s nominal, forced to 15-18 s across a blackout. Use as the floor for the micro-bolus `dt_min`.
+- **Limits:** treat only `< 0` as "no limit"; `0` is a literal zero limit (settings 112/113/114/115). Negative defaults 30 U / 40 U/h corroborated.
+- **No app-layer crypto in Lotus:** counter/epoch/nonce/trailer stay firmware + bench only.
+
