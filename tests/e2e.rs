@@ -385,7 +385,7 @@ fn an_absolute_temp_basal_needs_the_extended_bolus() {
     for rate in [1_200, 3_000] {
         assert_eq!(
             run.run(absolute(rate, HALF_HOUR)),
-            Outcome::Refused(Refusal::OutOfLimits)
+            Outcome::Refused(Refusal::Unsupported)
         );
     }
 }

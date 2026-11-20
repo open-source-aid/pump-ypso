@@ -320,20 +320,21 @@ impl Ctx {
         if request == 0 {
             return self.temp_basal(Percent::new(0), duration).await;
         }
-        if self.extended() {
-            let minutes = duration.as_secs() / 60;
-            let (amount, window) = self.plan_extended(requested, minutes);
-            let achieved = u64::from(amount.milliunits()).saturating_mul(60) / window;
-            if amount.milliunits() >= MIN_EXTENDED && within_tolerance(request, achieved) {
-                let ceiling = self.device.borrow().long_minutes;
-                let pump = (minutes + ZERO_RATE_EXTENSION).min(ceiling);
-                self.set_percent_tbr(Percent::new(0), Duration::from_secs(pump * 60), duration)
-                    .await?;
-                self.cancel_extended().await?;
-                self.extended_bolus(amount, Duration::from_secs(window * 60))
-                    .await?;
-                return Ok(done());
-            }
+        if !self.extended() {
+            return Ok(refused(Refusal::Unsupported));
+        }
+        let minutes = duration.as_secs() / 60;
+        let (amount, window) = self.plan_extended(requested, minutes);
+        let achieved = u64::from(amount.milliunits()).saturating_mul(60) / window;
+        if amount.milliunits() >= MIN_EXTENDED && within_tolerance(request, achieved) {
+            let ceiling = self.device.borrow().long_minutes;
+            let pump = (minutes + ZERO_RATE_EXTENSION).min(ceiling);
+            self.set_percent_tbr(Percent::new(0), Duration::from_secs(pump * 60), duration)
+                .await?;
+            self.cancel_extended().await?;
+            self.extended_bolus(amount, Duration::from_secs(window * 60))
+                .await?;
+            return Ok(done());
         }
         Ok(refused(Refusal::OutOfLimits))
     }
