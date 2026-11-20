@@ -8,7 +8,6 @@ use pump_shared::{
 use super::commands::{done, refused, tbr, HOUR, IMMEDIATE, SLOW};
 use super::io;
 use super::link::{unknown, Ctx, Halt, Step, WriteClass};
-use super::pump::milli;
 use crate::protocol::setting;
 use crate::Characteristic;
 
@@ -99,13 +98,6 @@ fn minutes(duration: Duration) -> i32 {
 
 fn within_tolerance(requested: u64, achieved: u64) -> bool {
     requested.abs_diff(achieved).saturating_mul(TOLERANCE) <= requested
-}
-
-fn basal_approximation(requested: BasalRate, achieved: BasalRate) -> Outcome {
-    Outcome::Approximated(Approximation::Basal {
-        requested,
-        achieved,
-    })
 }
 
 impl Ctx {
@@ -328,31 +320,6 @@ impl Ctx {
         if request == 0 {
             return self.temp_basal(Percent::new(0), duration).await;
         }
-        if let Some(scheduled) = self.scheduled_rate().await? {
-            if let Some(ideal) = requested.percent_of(scheduled) {
-                let cap = self
-                    .device
-                    .borrow()
-                    .limits
-                    .temp_basal_percent
-                    .as_ref()
-                    .map_or(0, |bounds| bounds.max.get());
-                let percent = ideal.get().min(cap);
-                let achieved = u64::from(scheduled.milliunits_per_hour())
-                    .saturating_mul(u64::from(percent))
-                    / 100;
-                if within_tolerance(request, achieved) {
-                    let rate = BasalRate::from_milliunits_per_hour(achieved as u32);
-                    return Ok(
-                        match self.temp_basal(Percent::new(percent), duration).await? {
-                            Outcome::Completed(_) if achieved == request => done(),
-                            Outcome::Completed(_) => basal_approximation(requested, rate),
-                            other => other,
-                        },
-                    );
-                }
-            }
-        }
         if self.extended() {
             let minutes = duration.as_secs() / 60;
             let (amount, window) = self.plan_extended(requested, minutes);
@@ -365,21 +332,10 @@ impl Ctx {
                 self.cancel_extended().await?;
                 self.extended_bolus(amount, Duration::from_secs(window * 60))
                     .await?;
-                let rate = BasalRate::from_milliunits_per_hour(achieved as u32);
-                return Ok(basal_approximation(requested, rate));
+                return Ok(done());
             }
         }
         Ok(refused(Refusal::OutOfLimits))
-    }
-
-    async fn scheduled_rate(&self) -> Step<Option<BasalRate>> {
-        let Some(slots) = self.active_profile().await? else {
-            return Ok(None);
-        };
-        let hour = (self.clock().await? / HOUR % 24) as usize;
-        Ok(Some(BasalRate::from_milliunits_per_hour(milli(
-            slots[hour],
-        ))))
     }
 
     fn plan_extended(&self, requested: BasalRate, minutes: u64) -> (InsulinAmount, u64) {

@@ -253,7 +253,9 @@ fn sets_and_cancels_a_temp_basal() {
         run.run(absolute(1_200, HALF_HOUR)),
         Outcome::Completed(Report::Done)
     );
-    assert_eq!(run.status().therapy.basal, running(150));
+    let therapy = run.status().therapy;
+    assert_eq!(therapy.basal, suspended(HALF_HOUR));
+    assert_eq!(therapy.extended, running_extended(600, 30));
 }
 
 fn absolute(milli: u32, duration: Duration) -> Command {
@@ -263,11 +265,11 @@ fn absolute(milli: u32, duration: Duration) -> Command {
     }
 }
 
-fn approx_basal(requested: u32, achieved: u32) -> Outcome {
-    Outcome::Approximated(Approximation::Basal {
-        requested: BasalRate::from_milliunits_per_hour(requested),
-        achieved: BasalRate::from_milliunits_per_hour(achieved),
-    })
+fn running_extended(milli: u32, window_minutes: u64) -> Extended {
+    Extended::Running {
+        amount: units(milli),
+        duration: Duration::from_secs(window_minutes * 60),
+    }
 }
 
 fn suspended(duration: Duration) -> Basal {
@@ -279,115 +281,66 @@ fn suspended(duration: Duration) -> Basal {
 
 #[cfg(feature = "delivery")]
 #[test]
-fn delivers_an_absolute_temp_basal() {
+fn delivers_an_absolute_temp_basal_as_an_extended_bolus() {
     let mut run = Run::new(sim(), &Blob::default());
     run.status();
-    assert_eq!(
-        run.run(absolute(1_200, HALF_HOUR)),
-        Outcome::Completed(Report::Done)
-    );
-    assert_eq!(
-        run.status().therapy.basal,
-        Basal::Temporary {
-            rate: TempBasalRate::Percent(Percent::new(150)),
-            duration: HALF_HOUR,
-        }
-    );
-    assert_eq!(
-        run.run(Command::CancelTempBasal),
-        Outcome::Completed(Report::Done)
-    );
-    assert_eq!(run.run(absolute(820, HALF_HOUR)), approx_basal(820, 824));
-    assert_eq!(
-        run.run(Command::CancelTempBasal),
-        Outcome::Completed(Report::Done)
-    );
+    let mut deliver = |rate, duration, milli, window| {
+        assert_eq!(
+            run.run(absolute(rate, duration)),
+            Outcome::Completed(Report::Done)
+        );
+        let therapy = run.status().therapy;
+        assert_eq!(therapy.basal, suspended(duration));
+        assert_eq!(therapy.extended, running_extended(milli, window));
+        assert_eq!(
+            run.run(Command::CancelExtendedBolus),
+            Outcome::Completed(Report::Done)
+        );
+        assert_eq!(
+            run.run(Command::CancelTempBasal),
+            Outcome::Completed(Report::Done)
+        );
+    };
+    // The requested rate becomes a bolus of rate * window / 60, delivered over a
+    // window stretched or shrunk to land the amount inside the bolus limits.
+    deliver(1_200, HALF_HOUR, 600, 30);
+    deliver(820, HALF_HOUR, 400, 30);
+    deliver(1_200, Duration::from_secs(20 * 60), 400, 20);
+    deliver(3_000, HALF_HOUR, 1_500, 30);
+    deliver(60_000, HOUR, 15_000, 15);
+    deliver(101_000, Duration::from_secs(15 * 60), 25_000, 15);
+
     assert_eq!(
         run.run(absolute(0, HALF_HOUR)),
         Outcome::Completed(Report::Done)
     );
     assert_eq!(run.status().therapy.basal, suspended(HALF_HOUR));
+    assert_eq!(run.status().therapy.extended, Extended::Idle);
     assert_eq!(
         run.run(Command::CancelTempBasal),
         Outcome::Completed(Report::Done)
     );
-    assert_eq!(
-        run.run(absolute(1_200, Duration::from_secs(20 * 60))),
-        Outcome::Refused(Refusal::OutOfLimits)
-    );
-    assert_eq!(
-        run.run(absolute(3_000, HALF_HOUR)),
-        approx_basal(3_000, 3_000)
-    );
-    let therapy = run.status().therapy;
-    assert_eq!(therapy.basal, suspended(HALF_HOUR));
-    assert_eq!(
-        therapy.extended,
-        Extended::Running {
-            amount: units(1_500),
-            duration: HALF_HOUR,
-        }
-    );
-    assert_eq!(
-        run.run(Command::CancelExtendedBolus),
-        Outcome::Completed(Report::Done)
-    );
-    assert_eq!(
-        run.run(Command::CancelTempBasal),
-        Outcome::Completed(Report::Done)
-    );
-    assert_eq!(
-        run.run(absolute(60_000, HOUR)),
-        approx_basal(60_000, 60_000)
-    );
-    assert_eq!(
-        run.status().therapy.extended,
-        Extended::Running {
-            amount: units(15_000),
-            duration: Duration::from_secs(15 * 60),
-        }
-    );
-    assert_eq!(
-        run.run(Command::CancelExtendedBolus),
-        Outcome::Completed(Report::Done)
-    );
-    assert_eq!(
-        run.run(Command::CancelTempBasal),
-        Outcome::Completed(Report::Done)
-    );
-    assert_eq!(
-        run.run(absolute(200_000, HALF_HOUR)),
-        Outcome::Refused(Refusal::OutOfLimits)
-    );
-    assert_eq!(
-        run.run(absolute(101_000, Duration::from_secs(15 * 60))),
-        approx_basal(101_000, 100_000)
-    );
-    assert_eq!(
-        run.run(Command::CancelExtendedBolus),
-        Outcome::Completed(Report::Done)
-    );
-    assert_eq!(
-        run.run(Command::CancelTempBasal),
-        Outcome::Completed(Report::Done)
-    );
-    assert_eq!(
-        run.run(absolute(60_000, Duration::from_secs(1_000_000_000_000))),
-        Outcome::Refused(Refusal::OutOfLimits)
-    );
+
+    for refused in [
+        absolute(200_000, HALF_HOUR),
+        absolute(60_000, Duration::from_secs(1_000_000_000_000)),
+    ] {
+        assert_eq!(run.run(refused), Outcome::Refused(Refusal::OutOfLimits));
+    }
 }
 
 #[cfg(feature = "delivery")]
 #[test]
-fn an_absolute_temp_basal_emulates_low_rates_and_a_zero_schedule() {
-    let mut pump = sim();
-    pump.settings.insert(setting::basal_a(12), 0);
-    let mut run = Run::new(pump, &Blob::default());
+fn an_absolute_temp_basal_stretches_a_low_rate_over_a_longer_window() {
+    let mut run = Run::new(sim(), &Blob::default());
     run.status();
+    // A rate too low to make the minimum bolus over the asked duration stretches
+    // the window until the amount clears the floor, independent of the schedule.
     assert_eq!(
-        run.run(absolute(1_000, HALF_HOUR)),
-        approx_basal(1_000, 1_000)
+        run.run(absolute(100, HALF_HOUR)),
+        Outcome::Completed(Report::Done)
     );
+    assert_eq!(run.status().therapy.extended, running_extended(100, 60));
     assert_eq!(
         run.run(Command::CancelExtendedBolus),
         Outcome::Completed(Report::Done)
@@ -396,34 +349,22 @@ fn an_absolute_temp_basal_emulates_low_rates_and_a_zero_schedule() {
         run.run(Command::CancelTempBasal),
         Outcome::Completed(Report::Done)
     );
-    assert_eq!(run.run(absolute(100, HALF_HOUR)), approx_basal(100, 100));
-    assert_eq!(
-        run.status().therapy.extended,
-        Extended::Running {
-            amount: units(100),
-            duration: HOUR,
-        }
-    );
-    assert_eq!(
-        run.run(Command::CancelExtendedBolus),
-        Outcome::Completed(Report::Done)
-    );
-    assert_eq!(
-        run.run(Command::CancelTempBasal),
-        Outcome::Completed(Report::Done)
-    );
+    // A rate that stays below the floor even stretched to the limit is refused.
     assert_eq!(
         run.run(absolute(50, HALF_HOUR)),
         Outcome::Refused(Refusal::OutOfLimits)
     );
+    // The extended path needs no readable schedule, so an unsupported profile
+    // selection does not stop it.
     run.harness
         .device
         .settings
         .insert(setting::BASAL_PROFILE_SELECTION, 4);
     assert_eq!(
         run.run(absolute(1_000, HALF_HOUR)),
-        approx_basal(1_000, 1_000)
+        Outcome::Completed(Report::Done)
     );
+    assert_eq!(run.status().therapy.extended, running_extended(500, 30));
     assert_eq!(
         run.run(Command::CancelExtendedBolus),
         Outcome::Completed(Report::Done)
@@ -436,23 +377,17 @@ fn an_absolute_temp_basal_emulates_low_rates_and_a_zero_schedule() {
 
 #[cfg(all(feature = "delivery", feature = "opn"))]
 #[test]
-fn an_absolute_temp_basal_without_the_extended_bolus_is_percent_only() {
+fn an_absolute_temp_basal_needs_the_extended_bolus() {
     let mut pump = opn();
     pump.versions.pump_base = "1.0".into();
     let mut run = Run::new(pump, &Blob::opn());
     run.status();
-    assert_eq!(
-        run.run(absolute(1_200, HALF_HOUR)),
-        Outcome::Completed(Report::Done)
-    );
-    assert_eq!(
-        run.run(Command::CancelTempBasal),
-        Outcome::Completed(Report::Done)
-    );
-    assert_eq!(
-        run.run(absolute(3_000, HALF_HOUR)),
-        Outcome::Refused(Refusal::OutOfLimits)
-    );
+    for rate in [1_200, 3_000] {
+        assert_eq!(
+            run.run(absolute(rate, HALF_HOUR)),
+            Outcome::Refused(Refusal::OutOfLimits)
+        );
+    }
 }
 
 #[test]
