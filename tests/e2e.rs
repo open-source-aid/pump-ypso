@@ -1790,6 +1790,14 @@ fn exercise() -> Recorder<YpsoSim> {
     }
     run.run(Command::Suspend);
     run.run(Command::Resume);
+    // Pairing is the only thing that reads the offer and writes the challenge
+    // on CRYPTO_SERVICE, so without it those two declarations go unexercised.
+    // It runs before `Unpair`, which erases the record pairing reads its
+    // credentials from — after it, a pair is refused before any BLE op.
+    run.run(Command::Pair {
+        address: Address::new(MAC),
+        server_key: Some(KeyRef::new("server")),
+    });
     run.run(Command::Unpair);
     run.harness.device
 }
