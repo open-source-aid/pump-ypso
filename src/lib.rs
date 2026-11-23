@@ -12,6 +12,7 @@ pub mod sim;
 
 pub use counters::{CounterError, CounterState, Counters, EpochChange};
 pub use driver::{Ypso, DRIVER};
+pub use engine::{inspect_session, SessionError, SessionSummary};
 pub use protocol::{
     AttError, Characteristic, Crypto, Frames, Opened, ProtoError, PumpError, Reassembler, Service,
     Status,

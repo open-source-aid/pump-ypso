@@ -25,26 +25,89 @@ pub(crate) struct Session {
     pub(crate) passwords: Vec<(u8, [u8; PASSWORD_LEN])>,
 }
 
+/// Why a session blob was refused.
+///
+/// Deliberately free of any part of the blob: a host shows these to a user
+/// and writes them to a log, and the blob is a 32-byte session key and an
+/// authorisation password. Nothing here carries either, nor an offset that
+/// would narrow them down.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
+pub enum SessionError {
+    /// Not a session blob at all — the `YB` magic is missing.
+    NotASession,
+    /// Shorter than the fixed header plus its checksum.
+    Truncated,
+    /// The CRC-32 over the body does not match the trailer.
+    BadChecksum,
+    /// A version byte this build does not accept. Version 4 is the keyless
+    /// OPN record and needs the `opn` feature.
+    UnsupportedVersion(u8),
+    /// The credential list is not well formed: a bad length, a non-printable
+    /// code, too many of them, or one that runs off the end.
+    MalformedCredentials,
+    /// A field is present but out of range: flags, validity, the counters or
+    /// an all-zero nonce prefix.
+    MalformedBody,
+}
+
+/// What a host may learn about a session blob *without* being handed its
+/// secrets.
+///
+/// The session key and every authorisation password stay inside
+/// [`Session`]. This is the part a user interface may show: which pump the
+/// blob is for, and which probe each credential selects.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SessionSummary {
+    pub mac: [u8; 6],
+    pub serial: u32,
+    pub version: u8,
+    pub keyless: bool,
+    /// The first byte of each credential code — the letter `authorise()`
+    /// uses to pick its probe. Not a secret; the password it goes with is
+    /// not here.
+    pub credential_codes: Vec<u8>,
+}
+
+/// Validate a session blob and report what it identifies.
+///
+/// Pure: no I/O, no state, nothing device-specific beyond the record layout.
+/// It is the same parser the engine loads through — `Session::decode` is
+/// this function keeping the session rather than the summary — so a host that
+/// checks a blob before storing it is checking exactly what the engine will
+/// later accept or reject.
+pub fn inspect_session(bytes: &[u8]) -> Result<SessionSummary, SessionError> {
+    Session::parse(bytes).map(|(_, summary)| summary)
+}
+
 impl Session {
     pub(crate) fn decode(bytes: &[u8]) -> Option<Self> {
-        if bytes.len() < HEADER_LEN + CRC_LEN || bytes[..2] != *b"YB" {
-            return None;
+        Self::parse(bytes).ok().map(|(session, _)| session)
+    }
+
+    fn parse(bytes: &[u8]) -> Result<(Self, SessionSummary), SessionError> {
+        if bytes.len() < 2 || bytes[..2] != *b"YB" {
+            return Err(SessionError::NotASession);
+        }
+        if bytes.len() < HEADER_LEN + CRC_LEN {
+            return Err(SessionError::Truncated);
         }
         let (body, crc) = bytes.split_at(bytes.len() - CRC_LEN);
         if crc32(body).to_le_bytes() != crc {
-            return None;
+            return Err(SessionError::BadChecksum);
         }
         let keyless = match (body[2], body[3]) {
             (1 | 3, 0) => false,
             (4, 1) if cfg!(feature = "opn") => true,
-            _ => return None,
+            (1 | 3, _) => return Err(SessionError::MalformedBody),
+            (version, _) => return Err(SessionError::UnsupportedVersion(version)),
         };
         let validity = match (body[2], body[74]) {
             (_, 0..=2) | (3, 3) => le_i64(&body[66..74]),
-            _ => return None,
+            _ => return Err(SessionError::MalformedBody),
         };
         if keyless && (validity != 0 || body[74] != 0) {
-            return None;
+            return Err(SessionError::MalformedBody);
         }
         let count = usize::from(body[91]);
         let mut passwords = Vec::new();
@@ -58,31 +121,39 @@ impl Session {
                     .iter()
                     .all(|b| (0x21..0x7F).contains(b))
             {
-                return None;
+                return Err(SessionError::MalformedCredentials);
             }
             passwords.push((body[at + 1], array(&body[end - PASSWORD_LEN..])));
             at = end;
         }
+        if count > MAX_CREDENTIALS || at != body.len() {
+            return Err(SessionError::MalformedCredentials);
+        }
         let (write, read) = (le_i64(&body[46..54]), le_i64(&body[54..62]));
         let prefix: [u8; PREFIX_LEN] = array(&body[75..]);
-        if count > MAX_CREDENTIALS
-            || at != body.len()
-            || write < -1
-            || read < -1
-            || prefix == [0; PREFIX_LEN]
-        {
-            return None;
+        if write < -1 || read < -1 || prefix == [0; PREFIX_LEN] {
+            return Err(SessionError::MalformedBody);
         }
         let key: [u8; KEY_LEN] = array(&body[14..]);
-        Some(Self {
+        let summary = SessionSummary {
             mac: array(&body[4..]),
             serial: le_u32(&body[10..14]),
-            crypto: (!keyless).then(|| Crypto::new(key)),
-            fingerprint: (!crc32_update(crc32_update(!0, b"ypso counters key"), &key)).max(1),
-            counters: (write, read, le_u32(&body[62..66])),
-            prefix,
-            passwords,
-        })
+            version: body[2],
+            keyless,
+            credential_codes: passwords.iter().map(|(code, _)| *code).collect(),
+        };
+        Ok((
+            Self {
+                mac: summary.mac,
+                serial: summary.serial,
+                crypto: (!keyless).then(|| Crypto::new(key)),
+                fingerprint: (!crc32_update(crc32_update(!0, b"ypso counters key"), &key)).max(1),
+                counters: (write, read, le_u32(&body[62..66])),
+                prefix,
+                passwords,
+            },
+            summary,
+        ))
     }
 
     pub(crate) fn resume(&mut self, stored: Option<&[u8]>) {
@@ -258,6 +329,54 @@ pub(crate) mod tests {
             .map(|s| s.crypto.is_none()),
             cfg!(feature = "opn").then_some(true)
         );
+    }
+
+    #[test]
+    fn inspection_says_why_a_blob_was_refused_without_quoting_it() {
+        let good = inspect_session(&blob(|_| {})).unwrap();
+        assert_eq!(good.serial, 10_155_555);
+        assert_eq!(good.mac, [0xEC, 0x2A, 0xF0, 1, 2, 3]);
+        assert_eq!(good.version, 1);
+        assert!(!good.keyless);
+        assert_eq!(good.credential_codes, alloc::vec![b'O']);
+
+        let mut short = blob(|_| {});
+        short.truncate(50);
+        let mut bad_crc = blob(|_| {});
+        bad_crc[95] ^= 1;
+        for (bytes, expected) in [
+            (alloc::vec![1, 2, 3], SessionError::NotASession),
+            (blob(|b| b[0] = b'X'), SessionError::NotASession),
+            (short, SessionError::Truncated),
+            (bad_crc, SessionError::BadChecksum),
+            (blob(|b| b[2] = 2), SessionError::UnsupportedVersion(2)),
+            (blob(|b| b[3] = 1), SessionError::MalformedBody),
+            (blob(|b| b[74] = 9), SessionError::MalformedBody),
+            (
+                blob(|b| b[75..91].copy_from_slice(&[0; 16])),
+                SessionError::MalformedBody,
+            ),
+            (blob(|b| b[91] = 2), SessionError::MalformedCredentials),
+            (blob(|b| b[93] = b' '), SessionError::MalformedCredentials),
+            (blob(|b| b.push(0)), SessionError::MalformedCredentials),
+        ] {
+            assert_eq!(inspect_session(&bytes), Err(expected));
+        }
+
+        // Version 4 is the keyless OPN record: accepted only with `opn`, and
+        // named as a version this build does not take otherwise.
+        let opn = blob(|b| {
+            b[2] = 4;
+            b[3] = 1
+        });
+        if cfg!(feature = "opn") {
+            assert!(inspect_session(&opn).unwrap().keyless);
+        } else {
+            assert_eq!(
+                inspect_session(&opn),
+                Err(SessionError::UnsupportedVersion(4))
+            );
+        }
     }
 
     #[test]

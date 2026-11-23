@@ -140,11 +140,23 @@ session seeds `Slot::Session` itself.
 
 ## If a host needs to migrate an existing pairing
 
-There is no public API for it: `Session` and the blob encoder are
-`pub(crate)`/test-only. A host must reproduce the table above byte for byte and
-`Action::Wrap` the result. If the group wants that supported rather than
-reverse-engineered, the clean entry point is a `pub fn` that builds the blob
-from named fields (address, serial, key, nonce prefix, credentials) — a pure
-encoder with no BLE behaviour, which is verifiable here and claims nothing about
-pairing. It is not added yet because it widens the API surface for a secret
-format and is a decision for the group, not for this note.
+Half of that is now supported. `pump_ypso::inspect_session` is a `pub fn`
+over the same parser the engine loads through: it validates a blob and returns
+a `SessionSummary` — address, serial, version, keyless flag and the credential
+*codes* — or a `SessionError` saying which check failed (`NotASession`,
+`Truncated`, `BadChecksum`, `UnsupportedVersion`, `MalformedCredentials`,
+`MalformedBody`). Neither type carries the session key or a password, and no
+variant quotes any part of the blob, so a host can show the reason to a user
+and log it. It is pure: no BLE, no state, and it claims nothing about pairing.
+
+Writing the blob stays the host's job, and it is a small one: `Action::Wrap`
+the bytes and store them in `Slot::Session`. Both the keystore and the store
+belong to the host, so a host can seed a session with no change here at all —
+and a freshly created engine then loads it and reports `Paired`.
+
+There is still **no encoder**. `Session` and the test blob builder are
+`pub(crate)`/test-only, and building a session is not the host's job: whoever
+can mint a pairing holds the server key. If the group ever wants one, the clean
+entry point is a `pub fn` that builds the blob from named fields — but a host
+that is handed a blob needs only `inspect_session` and the two host calls
+above.

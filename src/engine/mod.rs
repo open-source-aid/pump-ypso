@@ -8,6 +8,8 @@ mod link;
 mod pump;
 mod store;
 
+pub use store::{inspect_session, SessionError, SessionSummary};
+
 use alloc::boxed::Box;
 use alloc::collections::VecDeque;
 use alloc::rc::Rc;
