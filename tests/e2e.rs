@@ -11,10 +11,10 @@ use std::time::Duration;
 
 use e2e_support::*;
 use pump_shared::{
-    Action, Alarm, AlarmKind, Approximation, Basal, BasalProfile, BasalRate, BasalSegment, BleOp,
-    BleResult, BolusKind, Command, CommandId, Completion, Component, EngineState, Event, Extended,
-    Failure, HistoryEvent, LimitChange, Notification, Outcome, Percent, PumpMode, PumpTime,
-    Refusal, Report, Sequence, Slot, TempBasalPhase, TempBasalRate, UtcTime,
+    Action, Address, Alarm, AlarmKind, Approximation, Basal, BasalProfile, BasalRate, BasalSegment,
+    BleOp, BleResult, BolusKind, Command, CommandId, Completion, Component, EngineState, Event,
+    Extended, Failure, HistoryEvent, KeyRef, LimitChange, Notification, Outcome, Percent, PumpMode,
+    PumpTime, Refusal, Report, Sequence, Slot, TempBasalPhase, TempBasalRate, UtcTime,
 };
 use pump_shared::{Driver, NotifyKind, Uuid};
 use pump_ypso::protocol::{setting, uuids};
@@ -402,10 +402,6 @@ fn refuses_what_the_pump_cannot_do() {
         Command::SetDeliveryLimits {
             max_bolus: units(10_000),
             max_basal: BasalRate::from_milliunits_per_hour(2_000),
-        },
-        Command::Pair {
-            address: pump_shared::Address::new(MAC),
-            server_key: None,
         },
     ] {
         assert_eq!(run.run(command), Outcome::Refused(Refusal::Unsupported));
@@ -1843,4 +1839,94 @@ fn the_gatt_table_declares_notify_on_exactly_what_the_engine_subscribes_to() {
         device.subscribed.len(),
         declared.values().filter(|kind| kind.is_some()).count()
     );
+}
+
+// ===== Offline pairing ==========================================================================
+
+use chacha20::cipher::consts::U10;
+use curve25519_dalek::montgomery::MontgomeryPoint;
+use pump_ypso::protocol::KEY_LEN;
+
+/// The server secret the `YpsoSim` trusts (its default `server_secret`). The host's `key_agree`
+/// uses it for the `KeyRef` the pair names, so the engine never sees it in the clear.
+const SERVER: [u8; KEY_LEN] = [0x11; KEY_LEN];
+
+fn derive(secret: [u8; KEY_LEN], peer: [u8; KEY_LEN]) -> [u8; KEY_LEN] {
+    let shared = MontgomeryPoint(peer).mul_clamped(secret).to_bytes();
+    chacha20::hchacha::<U10>(&shared.into(), &[0u8; 16].into()).into()
+}
+
+/// The session key persisted in `Slot::Session` (the host wrap is the identity in the harness, so
+/// the stored bytes are the `"YB"` blob and its key field sits at bytes 14..46).
+fn stored_session_key(run: &Run<YpsoSim>) -> [u8; KEY_LEN] {
+    run.harness.store[&Slot::Session][14..14 + KEY_LEN]
+        .try_into()
+        .unwrap()
+}
+
+#[test]
+fn an_offline_pair_rekeys_the_pump_and_persists_the_agreed_session() {
+    let mut run = Run::new(sim(), &Blob::default());
+    assert_eq!(run.engine.state(), EngineState::Paired);
+    let pump_public = run.harness.device.pump_public();
+    let session = derive(SERVER, pump_public);
+
+    let outcome = run.run(Command::Pair {
+        address: Address::new(MAC),
+        server_key: Some(KeyRef::new("server")),
+    });
+
+    assert_eq!(outcome, Outcome::Completed(Report::Done));
+    assert_eq!(run.engine.state(), EngineState::Paired);
+    // The session key is derive(X25519(server, pump_pub)): the pump holds it, and so does the store.
+    assert_eq!(run.harness.device.key, Some(session));
+    assert_eq!(stored_session_key(&run), session);
+    assert_eq!(run.harness.device.pairing_counter, 1);
+    assert_eq!(run.harness.device.reboot, 1);
+}
+
+#[test]
+fn a_sealed_command_works_under_the_freshly_paired_key() {
+    let mut run = Run::new(sim(), &Blob::default());
+    assert_eq!(
+        run.run(Command::Pair {
+            address: Address::new(MAC),
+            server_key: Some(KeyRef::new("server")),
+        }),
+        Outcome::Completed(Report::Done)
+    );
+    // Past the pump's ~5-minute post-pair cooldown, a sealed read opens under the new key.
+    run.harness
+        .advance(run.engine.as_mut(), Duration::from_secs(300))
+        .expect("no violation");
+    assert_eq!(run.status().therapy.mode, PumpMode::Running);
+}
+
+#[test]
+fn an_offline_pair_without_a_server_key_is_refused() {
+    let mut run = Run::new(sim(), &Blob::default());
+    assert_eq!(
+        run.run(Command::Pair {
+            address: Address::new(MAC),
+            server_key: None,
+        }),
+        Outcome::Refused(Refusal::NotPaired)
+    );
+    // The pump keeps whatever key it held; nothing was written.
+    assert_eq!(run.harness.device.key, Some(KEY));
+}
+
+#[cfg(feature = "opn")]
+#[test]
+fn an_offline_pair_on_an_opn_pump_is_cleanly_unsupported() {
+    let mut run = Run::new(opn(), &Blob::opn());
+    assert_eq!(
+        run.run(Command::Pair {
+            address: Address::new(MAC),
+            server_key: Some(KeyRef::new("server")),
+        }),
+        Outcome::Refused(Refusal::Unsupported)
+    );
+    // Refused before connecting: no offer read against a pump with no CryptoService.
+    assert!(!run.harness.transcript.iter().any(|l| l.contains("Ble")));
 }

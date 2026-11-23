@@ -248,6 +248,7 @@ static INFO: DriverInfo = DriverInfo {
     // flow that does not exist; see `.docs/pairing.md` for what is missing.
     commands: &[
         CommandKind::Status,
+        CommandKind::Pair,
         CommandKind::Unpair,
         #[cfg(feature = "delivery")]
         CommandKind::Bolus,

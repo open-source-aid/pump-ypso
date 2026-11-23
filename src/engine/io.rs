@@ -7,7 +7,7 @@ use core::task::{Context, Poll};
 use core::time::Duration;
 
 use pump_shared::{
-    Action, BleOp, BleResult, Class, Completion, CompletionError, Event, OpId, Secret, Slot,
+    Action, BleOp, BleResult, Class, Completion, CompletionError, Event, KeyRef, OpId, Secret, Slot,
     TherapyState, Timestamp, UtcTime,
 };
 
@@ -17,6 +17,7 @@ enum Expect {
     Stored,
     Loaded,
     Secret,
+    Wrapped,
 }
 
 #[derive(Debug, Default)]
@@ -56,6 +57,7 @@ impl Io {
                 | (Expect::Stored, Completion::Stored)
                 | (Expect::Loaded, Completion::Loaded(_))
                 | (Expect::Secret, Completion::Secret(_))
+                | (Expect::Wrapped, Completion::Wrapped(_))
         );
         if !fits {
             return Err(CompletionError::Mismatch);
@@ -172,6 +174,43 @@ pub(crate) async fn load(io: &Shared, slot: Slot) -> Result<Option<Vec<u8>>, ()>
 pub(crate) async fn unwrap(io: &Shared, wrapped: Vec<u8>) -> Option<Secret> {
     match op(io, Expect::Secret, move |id| Action::Unwrap { id, wrapped }).await {
         Completion::Secret(secret) => Some(secret),
+        _ => None,
+    }
+}
+
+/// Seal a secret for storage at rest (the host's keystore wraps it). The offline pair uses this to
+/// persist the freshly agreed session before it is written to `Slot::Session`.
+pub(crate) async fn wrap(io: &Shared, plaintext: Secret) -> Option<Vec<u8>> {
+    match op(io, Expect::Wrapped, move |id| Action::Wrap { id, plaintext }).await {
+        Completion::Wrapped(bytes) => Some(bytes),
+        _ => None,
+    }
+}
+
+/// X25519 key agreement against a server key the host holds (the offline pair's secret the deeplink
+/// carried). Returns the raw shared point; the engine derives the session key from it. Passing the
+/// X25519 base point as `peer_public` yields the server key's own public key.
+pub(crate) async fn key_agree(io: &Shared, key: KeyRef, peer_public: [u8; 32]) -> Option<[u8; 32]> {
+    match op(io, Expect::Secret, move |id| Action::KeyAgree {
+        id,
+        key,
+        peer_public,
+    })
+    .await
+    {
+        Completion::Secret(secret) if secret.expose().len() == 32 => {
+            let mut out = [0u8; 32];
+            out.copy_from_slice(secret.expose());
+            Some(out)
+        }
+        _ => None,
+    }
+}
+
+/// `len` random bytes from the platform's generator.
+pub(crate) async fn random(io: &Shared, len: usize) -> Option<Secret> {
+    match op(io, Expect::Secret, move |id| Action::Random { id, len }).await {
+        Completion::Secret(secret) if secret.expose().len() == len => Some(secret),
         _ => None,
     }
 }
