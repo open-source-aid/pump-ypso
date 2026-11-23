@@ -563,9 +563,7 @@ fn seal_blob(k_s: &[u8; 32], nonce: &[u8; NONCE_LEN], plaintext: &[u8]) -> Optio
 fn pair_counter(io: &Shared) -> u64 {
     let io = io.borrow();
     io.wall
-        .map(|(wall, at)| {
-            wall.as_unix_millis() + io.now.as_millis().saturating_sub(at.as_millis())
-        })
+        .map(|(wall, at)| wall.as_unix_millis() + io.now.as_millis().saturating_sub(at.as_millis()))
         .filter(|&c| c > 0)
         .unwrap_or(1)
 }
@@ -745,7 +743,9 @@ pub(crate) async fn offline_pair(
         let nonce_bytes = io::random(&io, NONCE_LEN)
             .await
             .ok_or(Halt::Failed(Failure::Host))?;
-        let prefix_bytes = io::random(&io, 16).await.ok_or(Halt::Failed(Failure::Host))?;
+        let prefix_bytes = io::random(&io, 16)
+            .await
+            .ok_or(Halt::Failed(Failure::Host))?;
         let mut nonce = [0u8; NONCE_LEN];
         nonce.copy_from_slice(nonce_bytes.expose());
         let mut prefix = [0u8; 16];

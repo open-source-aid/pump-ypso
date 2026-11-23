@@ -7,8 +7,8 @@ use core::task::{Context, Poll};
 use core::time::Duration;
 
 use pump_shared::{
-    Action, BleOp, BleResult, Class, Completion, CompletionError, Event, KeyRef, OpId, Secret, Slot,
-    TherapyState, Timestamp, UtcTime,
+    Action, BleOp, BleResult, Class, Completion, CompletionError, Event, KeyRef, OpId, Secret,
+    Slot, TherapyState, Timestamp, UtcTime,
 };
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -181,7 +181,12 @@ pub(crate) async fn unwrap(io: &Shared, wrapped: Vec<u8>) -> Option<Secret> {
 /// Seal a secret for storage at rest (the host's keystore wraps it). The offline pair uses this to
 /// persist the freshly agreed session before it is written to `Slot::Session`.
 pub(crate) async fn wrap(io: &Shared, plaintext: Secret) -> Option<Vec<u8>> {
-    match op(io, Expect::Wrapped, move |id| Action::Wrap { id, plaintext }).await {
+    match op(io, Expect::Wrapped, move |id| Action::Wrap {
+        id,
+        plaintext,
+    })
+    .await
+    {
         Completion::Wrapped(bytes) => Some(bytes),
         _ => None,
     }
