@@ -111,6 +111,14 @@ static INFO: DriverInfo = DriverInfo {
         gatt!("extended read", CRYPTO_SERVICE, EXTENDED_READ),
     ],
     variants: VARIANTS,
+    // `CommandKind::Pair` is absent on purpose. The engine reaches
+    // `EngineState::Paired` only by loading a session a host already holds
+    // (`engine::load`); `Command::Pair` is refused `Unsupported` and emits no
+    // BLE op. The pump half of the exchange exists in `sim::pairing`, but the
+    // engine cannot drive it: it issues no `Action::KeyAgree`, `Action::Random`
+    // or `Action::Wrap`, and `Characteristic` cannot name `NEW_PUBLIC_KEY` or
+    // `WRITE_CHALLENGE_UTC_APP_PUB_KEY`. Declaring `Pair` here would promise a
+    // flow that does not exist; see `.docs/pairing.md` for what is missing.
     commands: &[
         CommandKind::Status,
         CommandKind::Unpair,

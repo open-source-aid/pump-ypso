@@ -19,7 +19,7 @@ What the simulator implements from the spec, Rockit and the firmware verificatio
 | 13 | Basal delivery model | 3-minute pulses with carry; status basal rate is the profile slot before the temp basal | watch the reservoir; read the status with a temp basal running |
 | 14 | Off-step bolus | accepted | send 0.07 U with the step at 0.10 U |
 | 15 | Setting writes | any id accepted; profile switch logs nothing; 112/113 log 33/34 (firmware); 3 logs 5 on any write, remote or `change_setting` (the firmware names the writer, not its callers) | write a non-basal setting and an out-of-range basal rate |
-| 16 | Offline pairing details | Rockit's current choices; fixed challenge; no "challenge in progress" 0x88; 0x81 without key at the exchange write; 0x88/0x89 also block sealed operations | one offline pairing: two offer reads, the blob write, sealed reads at 0, 4 and 6 minutes |
+| 16 | Offline pairing details | simulator only: the driver runs no pairing flow and `CommandKind::Pair` is not declared, see [pairing.md](pairing.md). Rockit's current choices; fixed challenge; no "challenge in progress" 0x88; 0x81 without key at the exchange write; 0x88/0x89 also block sealed operations | one offline pairing: two offer reads, the blob write, sealed reads at 0, 4 and 6 minutes |
 | 17 | `key_agree` result | raw X25519 | contract decision in pump-shared |
 | 18 | Access before the password outside settings | 0x08 for everything else; one full-access password | probe each service before the password and after each key |
 | 19 | Encrypted-class pump with no session | writes answer 0x8A | write a clear SettingID to an unpaired pump |
