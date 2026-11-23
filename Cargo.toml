@@ -23,5 +23,19 @@ curve25519-dalek = { version = "4.1", default-features = false, optional = true 
 libm = "0.2"
 pump-shared = { git = "https://github.com/open-source-aid/pump-shared", branch = "main", default-features = false }
 
+# Local development override. `Action::PublicKey` / `Completion::PublicKey` and
+# the `API_VERSION` bump to 2 are a pump-shared change that has not been pushed
+# yet, so until it lands on that repository's `main` this points the dependency
+# at the sibling checkout. Delete this section the moment it does: nothing else
+# here depends on the layout of the developer's disk.
+[patch."https://github.com/open-source-aid/pump-shared"]
+pump-shared = { path = "../pump-shared" }
+
+# Same, for the tester harness: it is a host, so the new exhaustive `Action`
+# variant makes it handle one more case. Delete this section once that change
+# lands on the tester repository's `main`.
+[patch."https://github.com/open-source-aid/tester"]
+tester-harness = { path = "../tester/crates/harness" }
+
 [dev-dependencies]
 tester-harness = { git = "https://github.com/open-source-aid/tester", branch = "main" }
