@@ -25,3 +25,8 @@ pump-shared = { git = "https://github.com/open-source-aid/pump-shared", branch =
 
 [dev-dependencies]
 tester-harness = { git = "https://github.com/open-source-aid/tester", branch = "main" }
+
+# TEMPORARY: unpushed `pump-shared` (API_VERSION 3, `DriverInfo::nominal`).
+# Delete this section once that change lands on `main` upstream.
+[patch."https://github.com/open-source-aid/pump-shared"]
+pump-shared = { path = "../pump-shared" }
