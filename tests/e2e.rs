@@ -6,6 +6,7 @@
 
 mod e2e_support;
 
+use std::collections::{BTreeMap, BTreeSet};
 use std::time::Duration;
 
 use e2e_support::*;
@@ -15,8 +16,10 @@ use pump_shared::{
     Failure, HistoryEvent, LimitChange, Notification, Outcome, Percent, PumpMode, PumpTime,
     Refusal, Report, Sequence, Slot, TempBasalPhase, TempBasalRate, UtcTime,
 };
+use pump_shared::{Driver, NotifyKind, Uuid};
 use pump_ypso::protocol::{setting, uuids};
 use pump_ypso::sim::{Log, YpsoSim, BOLUS_AMOUNT_CAP};
+use pump_ypso::DRIVER;
 use tester_harness::{Fault, SimDevice};
 
 const HALF_HOUR: Duration = Duration::from_secs(1800);
@@ -1669,5 +1672,175 @@ fn a_bolus_tolerates_a_count_without_a_readable_entry() {
             amount: units(1_500)
         }),
         Outcome::Completed(Report::Delivered(units(1_500)))
+    );
+}
+
+/// Records every characteristic the engine addresses, keyed `service/characteristic`,
+/// so the gatt table can be checked against what the engine really does.
+struct Recorder<D> {
+    inner: D,
+    touched: BTreeSet<String>,
+    subscribed: BTreeMap<String, NotifyKind>,
+}
+
+fn key(service: &Uuid, characteristic: &Uuid) -> String {
+    format!("{service}/{characteristic}")
+}
+
+impl<D: SimDevice> Recorder<D> {
+    fn new(inner: D) -> Self {
+        Self {
+            inner,
+            touched: BTreeSet::new(),
+            subscribed: BTreeMap::new(),
+        }
+    }
+}
+
+impl<D: SimDevice> SimDevice for Recorder<D> {
+    fn handle(&mut self, op: &BleOp, now: pump_shared::Timestamp) -> BleResult {
+        match op {
+            BleOp::Read {
+                service,
+                characteristic,
+            }
+            | BleOp::Write {
+                service,
+                characteristic,
+                ..
+            } => {
+                self.touched.insert(key(service, characteristic));
+            }
+            BleOp::Subscribe {
+                service,
+                characteristic,
+                kind,
+            } => {
+                self.subscribed.insert(key(service, characteristic), *kind);
+            }
+            BleOp::Unsubscribe {
+                service,
+                characteristic,
+            } => {
+                self.subscribed.remove(&key(service, characteristic));
+            }
+            BleOp::Connect { .. } | BleOp::Disconnect | BleOp::RequestFastInterval => {}
+        }
+        self.inner.handle(op, now)
+    }
+
+    fn key_agree(&mut self, key: &pump_shared::KeyRef, peer_public: &[u8; 32]) -> Option<[u8; 32]> {
+        self.inner.key_agree(key, peer_public)
+    }
+
+    fn poll_notification(&mut self, now: pump_shared::Timestamp) -> Option<Notification> {
+        self.inner.poll_notification(now)
+    }
+}
+
+/// Every characteristic `INFO.gatt` declares, keyed the same way as `Recorder`.
+fn declared() -> BTreeMap<String, Option<NotifyKind>> {
+    DRIVER
+        .info()
+        .gatt
+        .iter()
+        .map(|c| (key(&c.service, &c.characteristic), c.notify))
+        .collect()
+}
+
+/// Drives every command the driver announces and returns what the engine touched.
+fn exercise() -> Recorder<YpsoSim> {
+    let mut pump = sim();
+    let stamp = NOON as u32;
+    // Seeded so reading history walks the value characteristic of every log.
+    pump.events.push(stamp - 600, 16, [0; 3]);
+    pump.alarms.push(stamp - 900, 105, [0; 3]);
+    pump.complaints.push(stamp - 900, 206, [3, 1, 0]);
+    let mut run = Run::new(Recorder::new(pump), &Blob::default());
+    run.status();
+    run.run(Command::ReadClock);
+    run.run(Command::SyncClock);
+    run.run(Command::ReadBasalProfile);
+    let newest = run
+        .history(0)
+        .iter()
+        .map(|entry| entry.sequence.get())
+        .max()
+        .expect("seeded history");
+    // A second sweep from a cursor makes the engine select an index in each log.
+    let device = &mut run.harness.device.inner;
+    device.events.push(stamp, 25, [0; 3]);
+    device.alarms.push(stamp, 104, [0; 3]);
+    device.complaints.push(stamp, 204, [3, 2, 0]);
+    run.history(newest);
+    run.run(Command::CancelTempBasal);
+    run.run(Command::CancelExtendedBolus);
+    #[cfg(feature = "delivery")]
+    {
+        run.run(Command::Bolus {
+            amount: units(1_000),
+        });
+        run.run(temp_basal(120, HALF_HOUR));
+        run.run(Command::CancelTempBasal);
+        run.run(extended());
+        run.run(Command::CancelExtendedBolus);
+        run.run(Command::SetBasalProfile {
+            profile: BasalProfile::new(vec![BasalSegment {
+                start: Duration::ZERO,
+                rate: BasalRate::from_milliunits_per_hour(800),
+            }])
+            .unwrap(),
+        });
+    }
+    run.run(Command::Suspend);
+    run.run(Command::Resume);
+    run.run(Command::Unpair);
+    run.harness.device
+}
+
+/// The driver contract: `DriverInfo.gatt` lists every characteristic the engine
+/// may touch, and nothing it never touches.
+#[test]
+fn every_characteristic_the_engine_touches_is_declared() {
+    let device = exercise();
+    let declared = declared();
+    let undeclared: Vec<&String> = device
+        .touched
+        .iter()
+        .filter(|key| !declared.contains_key(*key))
+        .collect();
+    assert!(
+        undeclared.is_empty(),
+        "touched but not in INFO.gatt: {undeclared:?}"
+    );
+    // `StartStopBolus` is only reached on a delivery build, so the other
+    // direction is checked there.
+    #[cfg(feature = "delivery")]
+    {
+        let unused: Vec<&String> = declared
+            .keys()
+            .filter(|key| !device.touched.contains(*key))
+            .collect();
+        assert!(unused.is_empty(), "declared but never touched: {unused:?}");
+    }
+}
+
+/// Rule E9, both ways: a subscription must be declared with `notify` and that
+/// exact `NotifyKind`, and a declared `notify` must really be subscribed. The
+/// engine polls `GetBolusStatus` and never subscribes, so `CONTROL_NOTIFY` is
+/// deliberately absent from the table and every declared `notify` is `None`.
+#[test]
+fn the_gatt_table_declares_notify_on_exactly_what_the_engine_subscribes_to() {
+    let device = exercise();
+    let declared = declared();
+    let observed: BTreeMap<String, Option<NotifyKind>> = declared
+        .keys()
+        .map(|key| (key.clone(), device.subscribed.get(key).copied()))
+        .collect();
+    assert_eq!(observed, declared);
+    // Nothing is subscribed outside the table either.
+    assert_eq!(
+        device.subscribed.len(),
+        declared.values().filter(|kind| kind.is_some()).count()
     );
 }

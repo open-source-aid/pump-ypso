@@ -13,6 +13,14 @@ pub struct Ypso;
 
 pub static DRIVER: Ypso = Ypso;
 
+// Every characteristic the engine may touch is declared below. `notify` is `None`
+// throughout because the engine never emits `BleOp::Subscribe`: it polls
+// `GetBolusStatus` and `GetSystemStatus` instead, and never addresses
+// `CONTROL_NOTIFY` (`Characteristic::BolusStatusNotification` is unused by the
+// engine; see `.docs/to-confirm.md` item 1). Rule E9 is checked by
+// `the_gatt_table_declares_notify_on_exactly_what_the_engine_subscribes_to`
+// in `tests/e2e.rs`; declaring a `notify` here without a matching subscription
+// would be just as untruthful as the reverse.
 macro_rules! gatt {
     ($name:literal, $service:ident, $characteristic:ident $(,)?) => {
         GattChar {
@@ -75,6 +83,23 @@ static INFO: DriverInfo = DriverInfo {
         gatt!("system time", SETTINGS_SERVICE, SYSTEM_TIME),
         gatt!("history version", HISTORY_SERVICE, HISTORY_SERVICE_VERSION),
         gatt!("alarm entry count", HISTORY_SERVICE, ALARM_ENTRY_COUNT),
+        gatt!("alarm entry index", HISTORY_SERVICE, ALARM_ENTRY_INDEX),
+        gatt!("alarm entry value", HISTORY_SERVICE, ALARM_ENTRY_VALUE),
+        gatt!(
+            "complaint entry count",
+            HISTORY_SERVICE,
+            COMPLAINT_ENTRY_COUNT,
+        ),
+        gatt!(
+            "complaint entry index",
+            HISTORY_SERVICE,
+            COMPLAINT_ENTRY_INDEX,
+        ),
+        gatt!(
+            "complaint entry value",
+            HISTORY_SERVICE,
+            COMPLAINT_ENTRY_VALUE,
+        ),
         gatt!("event entry count", HISTORY_SERVICE, EVENT_ENTRY_COUNT),
         gatt!("event entry index", HISTORY_SERVICE, EVENT_ENTRY_INDEX),
         gatt!("event entry value", HISTORY_SERVICE, EVENT_ENTRY_VALUE),
