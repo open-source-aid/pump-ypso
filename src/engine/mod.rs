@@ -22,7 +22,7 @@ use pump_shared::{
 };
 
 use io::Shared;
-use link::Ctx;
+use link::{offline_pair, Ctx};
 use store::{Nonces, Session};
 
 const QUEUE_LEN: usize = 4;
@@ -33,6 +33,8 @@ enum Running {
     Load(Task<Option<Ctx>>),
     Command(CommandId, Task<Outcome>),
     Stop(CommandId, Task<Outcome>),
+    /// The offline pair, which bootstraps its own session and hands back the live `Ctx` on success.
+    Pair(CommandId, Task<(Outcome, Option<Ctx>)>),
 }
 
 pub(crate) struct YpsoEngine {
@@ -44,6 +46,8 @@ pub(crate) struct YpsoEngine {
     stop: Option<CommandId>,
     therapy: TherapyState,
     state: EngineState,
+    variant: &'static str,
+    utc_offset: i32,
 }
 
 impl YpsoEngine {
@@ -59,6 +63,8 @@ impl YpsoEngine {
             stop: None,
             therapy: TherapyState::default(),
             state: EngineState::Loading,
+            variant,
+            utc_offset: config.utc_offset_secs,
         };
         engine.run();
         engine
@@ -88,6 +94,28 @@ impl YpsoEngine {
     }
 
     fn start(&mut self) {
+        // The offline pair bootstraps its own session, so it runs whether or not a ctx exists (and
+        // never through `ctx.run`, which has no plan for it). A pending stop takes precedence.
+        if self.stop.is_none() && matches!(self.queue.front(), Some((_, Command::Pair { .. }))) {
+            let (id, command) = self.queue.pop_front().expect("front just matched");
+            let Command::Pair {
+                address,
+                server_key,
+            } = command
+            else {
+                unreachable!("front just matched Command::Pair")
+            };
+            self.event(Event::Started { id });
+            let task = Box::pin(offline_pair(
+                self.io.clone(),
+                address,
+                server_key,
+                self.utc_offset,
+                self.variant,
+            ));
+            self.running = Some(Running::Pair(id, task));
+            return;
+        }
         let Some(ctx) = self.ctx.clone() else {
             if let Some(id) = self.stop.take() {
                 self.finish(id, Outcome::Refused(Refusal::NotPaired));
@@ -157,6 +185,21 @@ impl YpsoEngine {
                     match task.as_mut().poll(&mut cx) {
                         Poll::Ready(outcome) => {
                             self.ended(id, outcome);
+                            true
+                        }
+                        Poll::Pending => false,
+                    }
+                }
+                Some(Running::Pair(id, task)) => {
+                    let id = *id;
+                    match task.as_mut().poll(&mut cx) {
+                        Poll::Ready((outcome, ctx)) => {
+                            self.running = None;
+                            if let Some(ctx) = ctx {
+                                self.ctx = Some(Rc::new(ctx));
+                                self.set_state(EngineState::Paired);
+                            }
+                            self.finish(id, outcome);
                             true
                         }
                         Poll::Pending => false,

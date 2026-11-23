@@ -85,6 +85,31 @@ impl Session {
         })
     }
 
+    /// Serialise the session into the `"YB"` blob [`Session::decode`] reads back, with `key` as the
+    /// session key. The offline pair uses this to persist a freshly agreed session; `validity` is
+    /// not kept (the engine does not use it).
+    pub(crate) fn encode(&self, key: &[u8; KEY_LEN]) -> Vec<u8> {
+        let mut body = alloc::vec![b'Y', b'B', 1, 0];
+        body.extend_from_slice(&self.mac);
+        body.extend_from_slice(&self.serial.to_le_bytes());
+        body.extend_from_slice(key);
+        body.extend_from_slice(&self.counters.0.to_le_bytes());
+        body.extend_from_slice(&self.counters.1.to_le_bytes());
+        body.extend_from_slice(&self.counters.2.to_le_bytes());
+        body.extend_from_slice(&0i64.to_le_bytes()); // validity (unused by the engine)
+        body.push(0); // validity kind
+        body.extend_from_slice(&self.prefix);
+        body.push(self.passwords.len() as u8);
+        for (code, password) in &self.passwords {
+            body.push(1); // code length (one byte, as decode keeps only the first)
+            body.push(*code);
+            body.extend_from_slice(password);
+        }
+        let crc = crc32(&body);
+        body.extend_from_slice(&crc.to_le_bytes());
+        body
+    }
+
     pub(crate) fn resume(&mut self, stored: Option<&[u8]>) {
         let Some(bytes) = stored.filter(|b| b.len() == COUNTERS_LEN) else {
             return;

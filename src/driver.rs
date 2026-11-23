@@ -88,6 +88,7 @@ static INFO: DriverInfo = DriverInfo {
     variants: VARIANTS,
     commands: &[
         CommandKind::Status,
+        CommandKind::Pair,
         CommandKind::Unpair,
         #[cfg(feature = "delivery")]
         CommandKind::Bolus,
