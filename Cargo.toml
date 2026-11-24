@@ -19,6 +19,7 @@ delivery = []
 [dependencies]
 chacha20 = { version = "0.9", default-features = false }
 chacha20poly1305 = { version = "0.10", default-features = false, features = ["alloc"] }
+md-5 = { version = "0.10", default-features = false }
 curve25519-dalek = { version = "4.1", default-features = false, optional = true }
 libm = "0.2"
 pump-shared = { git = "https://github.com/open-source-aid/pump-shared", branch = "main", default-features = false }

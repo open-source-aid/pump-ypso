@@ -464,7 +464,8 @@ impl Ctx {
 
     async fn authorise(&self) -> Step<()> {
         let mut last = Ok(());
-        for (code, password) in &self.session.passwords {
+        let ladder = crate::auth::ladder(self.session.serial, &self.session.passwords);
+        for (code, password) in &ladder {
             last = match self
                 .raw_write(Characteristic::AuthorizationPassword, password.to_vec())
                 .await
@@ -710,7 +711,10 @@ pub(crate) async fn offline_pair(
     if provision.crypto.is_none() {
         return (Outcome::Refused(Refusal::Unsupported), None);
     }
+    // The stored session keeps the provisioned credentials; the derived L2 rung is added at
+    // authorisation time (here and on every later connect), never persisted.
     let passwords = provision.passwords.clone();
+    let auth_ladder = crate::auth::ladder(provision.serial, &passwords);
     let mut ctx = Ctx::new(
         io.clone(),
         Session {
@@ -729,7 +733,7 @@ pub(crate) async fn offline_pair(
 
     let prepared = async {
         ctx.pair_connect().await?;
-        let offer = ctx.pair_offer(&passwords).await?;
+        let offer = ctx.pair_offer(&auth_ladder).await?;
         // The server's public key for the blob's field: the same agreement against the base point.
         let mut basepoint = [0u8; 32];
         basepoint[0] = 9;
