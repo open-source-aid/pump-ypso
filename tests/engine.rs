@@ -109,6 +109,7 @@ fn pump() -> Pump {
 fn read_all() -> Command {
     Command::ReadHistory {
         after: Sequence::new(0),
+        limit: None,
     }
 }
 
@@ -215,10 +216,10 @@ fn skips_corrupt_entries_without_failing_the_history() {
     let mut corrupt = entry(16, 0);
     corrupt[18] ^= 0xFF;
     run.harness.device.answer = Some((uuids::EVENT_ENTRY_VALUE, corrupt));
-    assert_eq!(
+    assert!(matches!(
         run.run(read_all()),
-        Outcome::Completed(Report::History(vec![]))
-    );
+        Outcome::Completed(Report::History { entries, .. }) if entries.is_empty()
+    ));
 }
 
 #[test]
@@ -234,6 +235,25 @@ fn restarts_once_when_the_log_grows_then_settles() {
 }
 
 #[test]
+fn a_bound_returns_the_newest_window_and_still_reports_the_true_newest() {
+    let mut run = Run::new(log_of(5), &Blob::default());
+    let (full, full_newest) = run.history_page(0, None);
+    let (page, page_newest) = run.history_page(0, Some(2));
+    // The whole log is more than the bound, and the bound keeps exactly its two
+    // newest entries, in the same newest-first order as the full read.
+    assert!(full.len() > 2);
+    assert_eq!(
+        page.iter().map(|e| e.sequence).collect::<Vec<_>>(),
+        full[..2].iter().map(|e| e.sequence).collect::<Vec<_>>()
+    );
+    // `newest` is the pump's current newest sequence, independent of the bound:
+    // the same on the bounded page as on the full read, and equal to the newest
+    // entry it returns.
+    assert_eq!(full_newest, full[0].sequence);
+    assert_eq!(page_newest, full_newest);
+}
+
+#[test]
 fn a_log_that_keeps_moving_is_tolerated_not_failed() {
     let mut run = Run::new(log_of(4), &Blob::default());
     run.harness.device.answer = Some((uuids::EVENT_ENTRY_VALUE, entry(16, 7)));
@@ -242,7 +262,7 @@ fn a_log_that_keeps_moving_is_tolerated_not_failed() {
     run.harness.device.grow = [0, 1, 1, 1, 1, 1].into();
     assert!(matches!(
         run.run(read_all()),
-        Outcome::Completed(Report::History(_))
+        Outcome::Completed(Report::History { .. })
     ));
 }
 

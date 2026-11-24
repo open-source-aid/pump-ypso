@@ -103,7 +103,10 @@ impl Ctx {
             }),
             Plan::ReadClock => Report::Clock(PumpTime::from_local_seconds(self.clock().await?)),
             Plan::SyncClock => return self.sync_clock().await,
-            Plan::History(after) => Report::History(self.history(after).await?),
+            Plan::History(after, limit) => {
+                let (entries, newest) = self.history(after, limit).await?;
+                Report::History { entries, newest }
+            }
             Plan::ReadProfile => match self.active_profile().await?.and_then(|s| profile(&s)) {
                 Some(profile) => Report::Profile(profile),
                 None => return Ok(refused(Refusal::Unsupported)),
@@ -260,7 +263,7 @@ enum Plan {
     Status,
     ReadClock,
     SyncClock,
-    History(Sequence),
+    History(Sequence, Option<u16>),
     ReadProfile,
     CancelTempBasal,
     CancelExtended,
@@ -317,7 +320,7 @@ fn plan(command: Command) -> Result<Plan, Refusal> {
         Command::Status => Plan::Status,
         Command::ReadClock => Plan::ReadClock,
         Command::SyncClock => Plan::SyncClock,
-        Command::ReadHistory { after } => Plan::History(after),
+        Command::ReadHistory { after, limit } => Plan::History(after, limit),
         Command::ReadBasalProfile => Plan::ReadProfile,
         Command::CancelTempBasal => Plan::CancelTempBasal,
         Command::TempBasal { rate, .. } if rate.is_neutral() => Plan::CancelTempBasal,

@@ -248,20 +248,36 @@ impl Ctx {
         }
     }
 
-    async fn walk(&self, log: Log, stop: impl Fn(&Raw) -> bool) -> Step<(Vec<Raw>, Option<u32>)> {
+    async fn walk(
+        &self,
+        log: Log,
+        stop: impl Fn(&Raw) -> bool,
+        limit: Option<u16>,
+    ) -> Step<(Vec<Raw>, Option<u32>, Option<Sequence>)> {
         let [count, ..] = log.characteristics();
-        let mut collected = (Vec::new(), None);
+        let mut collected = (Vec::new(), None, None);
         for _ in 0..2 {
             let count = super::link::le_i32(&self.read_sized(count, 4).await?, 0);
             let mut raws: Vec<Raw> = Vec::new();
             let mut cutoff = None;
+            let mut newest = None;
             let mut changed = false;
             for index in 0..u16::try_from(count.max(0)).unwrap_or(u16::MAX) {
+                // The bound stops the walk once the newest `limit` entries are in
+                // hand, and carries their oldest timestamp into `cutoff` so the
+                // alarm and complaint logs are held to the same window.
+                if limit.is_some_and(|n| raws.len() >= usize::from(n)) {
+                    cutoff = raws.last().map(|raw| raw.seconds);
+                    break;
+                }
                 let raw = match self.entry(log, index).await? {
                     None => break,
                     Some(Err(())) => continue,
                     Some(Ok(raw)) => raw,
                 };
+                // The first record read is the newest the pump holds (index 0),
+                // reported even when `stop` or the bound keeps it out of the page.
+                newest.get_or_insert_with(|| log.sequence(&raw));
                 if stop(&raw) {
                     cutoff = Some(raw.seconds);
                     break;
@@ -273,25 +289,32 @@ impl Ctx {
                 raws.push(raw);
             }
             if !changed {
-                return Ok((raws, cutoff));
+                return Ok((raws, cutoff, newest));
             }
-            collected = (raws, cutoff);
+            collected = (raws, cutoff, newest);
         }
         Ok(collected)
     }
 
-    pub(crate) async fn history(&self, after: Sequence) -> Step<Vec<HistoryEntry>> {
+    pub(crate) async fn history(
+        &self,
+        after: Sequence,
+        limit: Option<u16>,
+    ) -> Step<(Vec<HistoryEntry>, Sequence)> {
         let after = after.get();
         let cursor = (after >> LOG_SHIFT == Log::Event as u32).then_some(after & SEQUENCE_MASK);
         let stop = |raw: &Raw| cursor.is_some_and(|c| raw.sequence <= c && !running(raw));
-        let (raws, cutoff) = self.walk(Log::Event, stop).await?;
+        let (raws, cutoff, newest) = self.walk(Log::Event, stop, limit).await?;
+        // Log-encoded like the entries' own sequence, so the host compares it
+        // against the page and its cursor; the event-tagged zero on an empty log.
+        let newest = newest.unwrap_or_else(|| Sequence::new((Log::Event as u32) << LOG_SHIFT));
         let mut entries = self.entries(Log::Event, raws);
         for log in [Log::Alarm, Log::Complaint] {
             let older = |raw: &Raw| cutoff.is_some_and(|s| raw.seconds < s);
-            let (raws, _) = self.walk(log, older).await?;
+            let (raws, ..) = self.walk(log, older, None).await?;
             entries.extend(self.entries(log, raws));
         }
-        Ok(entries)
+        Ok((entries, newest))
     }
 
     fn entries(&self, log: Log, raws: Vec<Raw>) -> Vec<HistoryEntry> {
@@ -331,7 +354,9 @@ impl Ctx {
 
     #[cfg(feature = "delivery")]
     pub(crate) async fn replay(&self, after: u32) -> Step<(InsulinAmount, Option<u64>)> {
-        let (raws, _) = self.walk(Log::Event, |raw| raw.sequence <= after).await?;
+        let (raws, ..) = self
+            .walk(Log::Event, |raw| raw.sequence <= after, None)
+            .await?;
         let mut delivered = 0u32;
         let mut seconds: Vec<u64> = Vec::new();
         for raw in &raws {
@@ -357,8 +382,8 @@ impl Ctx {
 
     #[cfg(feature = "delivery")]
     pub(crate) async fn delivered_since(&self, sequence: u32) -> Step<Option<InsulinAmount>> {
-        let (raws, _) = self
-            .walk(Log::Event, |raw| raw.sequence <= sequence)
+        let (raws, ..) = self
+            .walk(Log::Event, |raw| raw.sequence <= sequence, None)
             .await?;
         Ok(raws.iter().find_map(|raw| match event(raw) {
             Some(HistoryEvent::Bolus {

@@ -1263,6 +1263,7 @@ fn acts() -> Vec<(Prepare, Act)> {
                 r,
                 Command::ReadHistory {
                     after: Sequence::new(0),
+                    limit: None,
                 },
             )
         }),

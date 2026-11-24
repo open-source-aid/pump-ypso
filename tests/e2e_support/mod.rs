@@ -181,10 +181,19 @@ impl<D: SimDevice> Run<D> {
     }
 
     pub fn history(&mut self, after: u32) -> Vec<HistoryEntry> {
+        self.history_page(after, None).0
+    }
+
+    pub fn history_page(
+        &mut self,
+        after: u32,
+        limit: Option<u16>,
+    ) -> (Vec<HistoryEntry>, Sequence) {
         match self.run(Command::ReadHistory {
             after: Sequence::new(after),
+            limit,
         }) {
-            Outcome::Completed(Report::History(entries)) => entries,
+            Outcome::Completed(Report::History { entries, newest }) => (entries, newest),
             other => panic!("{other:?}"),
         }
     }
