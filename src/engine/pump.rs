@@ -2,7 +2,7 @@ use alloc::vec;
 use core::time::Duration;
 
 use pump_shared::{
-    Basal, BasalRate, Bolus, Bounds, Capabilities, Extended, Failure, InsulinAmount, Limits,
+    Basal, BasalRate, Bolus, Bounds, Capabilities, Event, Extended, Failure, InsulinAmount, Limits,
     Percent, PumpMode, PumpStatus, PumpTime, TempBasalRate, TherapyState, Tier,
 };
 
@@ -191,15 +191,25 @@ impl Device {
 
 impl Ctx {
     pub(crate) async fn system(&self) -> Step<System> {
-        System::decode(&self.read_sized(Characteristic::GetSystemStatus, 14).await?)
+        let bytes = self.read_sized(Characteristic::GetSystemStatus, 14).await?;
+        // Diagnostic: the raw delivery-mode byte. Its run/stop enumeration is not
+        // established by any reference we have, so we log the ground-truth value to
+        // map it against a device confirmed running vs. stopped on its own screen.
+        self.emit(Event::Log {
+            level: 1,
+            line: alloc::format!("ypso sys0={}", bytes[0]),
+        });
+        System::decode(&bytes)
     }
 
     pub(crate) async fn bolus_state(&self) -> Step<BolusState> {
         let extended = self.extended();
-        BolusState::decode(
-            &self.read_sized(Characteristic::GetBolusStatus, 13).await?,
-            extended,
-        )
+        let bytes = self.read_sized(Characteristic::GetBolusStatus, 13).await?;
+        self.emit(Event::Log {
+            level: 1,
+            line: alloc::format!("ypso bolus0={}", bytes[0]),
+        });
+        BolusState::decode(&bytes, extended)
     }
 
     pub(crate) fn extended(&self) -> bool {
