@@ -155,13 +155,23 @@ mod tests {
 
     #[test]
     fn the_ladder_trails_the_provisioned_credentials_with_the_derived_l2_rung() {
-        // Whatever the configured secret, a provisioned credential is tried first; a derived L2
-        // rung (code `b'L'`) only follows it as a fallback.
+        // A provisioned credential is tried first; the derived L2 rung (code `b'L'`) only follows it
+        // as a fallback.
         let provisioned = [(b'O', [0x5A; 16])];
-        let rungs = ladder(10_155_555, &provisioned);
-        match derive_l2(10_155_555) {
-            Some(l2) => assert_eq!(rungs, [provisioned[0], (L2_CODE, l2)]),
-            None => assert_eq!(rungs, provisioned.to_vec()),
-        }
+        let l2 = derive_l2(10_155_555).expect("the L2 secret is configured");
+        assert_eq!(
+            ladder(10_155_555, &provisioned),
+            [provisioned[0], (L2_CODE, l2)]
+        );
+    }
+
+    #[test]
+    fn the_ladder_omits_the_l2_rung_when_the_serial_has_no_mac() {
+        // A serial with no valid MAC derives no L2 password, so the ladder is just the provisioned
+        // credentials with nothing appended.
+        let provisioned = [(b'O', [0x5A; 16])];
+        let no_mac = 10_000_000 + 0x0100_0000;
+        assert_eq!(derive_l2(no_mac), None);
+        assert_eq!(ladder(no_mac, &provisioned), provisioned.to_vec());
     }
 }

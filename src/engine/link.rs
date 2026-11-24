@@ -543,20 +543,22 @@ fn hchacha20(input: &[u8; 32]) -> [u8; 32] {
     chacha20::hchacha::<U10>(input.into(), &[0u8; 16].into()).into()
 }
 
-/// Seal `plaintext` as `ciphertext ‖ tag ‖ nonce` under `k_s` with XChaCha20-Poly1305.
-fn seal_blob(k_s: &[u8; 32], nonce: &[u8; NONCE_LEN], plaintext: &[u8]) -> Option<Vec<u8>> {
+/// Seal `plaintext` as `ciphertext ‖ tag ‖ nonce` under `k_s` with XChaCha20-Poly1305. Infallible:
+/// XChaCha20-Poly1305 only refuses inputs beyond `u64`/`u32` lengths, and the pairing plaintext is a
+/// fixed 76 bytes.
+fn seal_blob(k_s: &[u8; 32], nonce: &[u8; NONCE_LEN], plaintext: &[u8]) -> Vec<u8> {
     use chacha20poly1305::aead::{AeadInPlace, KeyInit};
     use chacha20poly1305::{XChaCha20Poly1305, XNonce};
     let cipher = XChaCha20Poly1305::new(k_s.into());
     let mut buf = plaintext.to_vec();
     let tag = cipher
         .encrypt_in_place_detached(XNonce::from_slice(nonce), &[], &mut buf)
-        .ok()?;
+        .expect("XChaCha20-Poly1305 seals the fixed-size pairing blob");
     let mut blob = Vec::with_capacity(PAIR_BLOB_LEN);
     blob.extend_from_slice(&buf);
     blob.extend_from_slice(&tag);
     blob.extend_from_slice(nonce);
-    Some(blob)
+    blob
 }
 
 /// A counter strictly above any the pump can already hold: milliseconds since 1970 when the wall
@@ -667,7 +669,8 @@ impl Ctx {
 
     /// Write the authorisation blob's frames to WriteChallengeUtcAppPubKey (a cleartext write).
     async fn pair_write_blob(&self, blob: &[u8]) -> Step<()> {
-        let frames = Frames::split(blob).map_err(|_| Halt::Failed(Failure::Protocol))?;
+        // The sealed blob is a fixed 116 bytes, which always frames.
+        let frames = Frames::split(blob).expect("the pairing blob always frames");
         for frame in frames {
             match self
                 .ble(BleOp::Write {
@@ -767,7 +770,7 @@ pub(crate) async fn offline_pair(
         pt[32..36].copy_from_slice(&PAIR_TTL_SECS.to_le_bytes());
         pt[36..68].copy_from_slice(&server_public);
         pt[68..76].copy_from_slice(&pair_counter(&io).to_le_bytes());
-        let blob = seal_blob(&k_s, &nonce, &pt).ok_or(Halt::Failed(Failure::Protocol))?;
+        let blob = seal_blob(&k_s, &nonce, &pt);
         Ok::<_, Halt>((k_s, prefix, blob))
     }
     .await;
@@ -789,9 +792,9 @@ pub(crate) async fn offline_pair(
                 return (Outcome::Failed(Failure::Host), None);
             }
             match ctx.pair_verify().await {
-                Ok(()) => (Outcome::Completed(Report::Done), Some(ctx)),
-                // The post-pair cooldown / not-ready: the pump took the key, proven at a later read.
-                Err(Halt::Failed(Failure::Status(ERR_BLOCKED | ERR_NOT_READY))) => {
+                // Proven under the new key, or the pump is in its post-pair cooldown / not-ready
+                // (0x88 / 0x89): either way it took the key, settled now or at a later read.
+                Ok(()) | Err(Halt::Failed(Failure::Status(ERR_BLOCKED | ERR_NOT_READY))) => {
                     (Outcome::Completed(Report::Done), Some(ctx))
                 }
                 Err(Halt::Failed(Failure::KeyRejected)) => {

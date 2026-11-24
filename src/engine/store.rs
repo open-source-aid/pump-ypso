@@ -394,14 +394,13 @@ pub(crate) mod tests {
             b[2] = 4;
             b[3] = 1
         });
-        if cfg!(feature = "opn") {
-            assert!(inspect_session(&opn).unwrap().keyless);
-        } else {
-            assert_eq!(
-                inspect_session(&opn),
-                Err(SessionError::UnsupportedVersion(4))
-            );
-        }
+        #[cfg(feature = "opn")]
+        assert!(inspect_session(&opn).unwrap().keyless);
+        #[cfg(not(feature = "opn"))]
+        assert_eq!(
+            inspect_session(&opn),
+            Err(SessionError::UnsupportedVersion(4))
+        );
     }
 
     #[test]

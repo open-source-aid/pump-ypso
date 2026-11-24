@@ -1989,3 +1989,214 @@ fn an_offline_pair_with_no_record_and_a_foreign_address_is_refused() {
     // A non-YpsoPump address has no serial to bootstrap from: refused before any BLE.
     assert!(!run.harness.transcript.iter().any(|l| l.contains("Ble")));
 }
+
+fn offline_pair_survives_a_fault_at_every_step(fault: Fault) {
+    let mut step = 1;
+    loop {
+        let mut run = Run::new(sim(), &Blob::default());
+        let before = run.harness.transcript.len();
+        run.harness.faults.insert(before + step, fault);
+        let id = run.submit(Command::Pair {
+            address: Address::new(MAC),
+            server_key: Some(KeyRef::new("server")),
+        });
+        let mut outcome = run.outcome(id);
+        while outcome.is_none() {
+            run.settle();
+            outcome = run.outcome(id);
+        }
+        if run.harness.transcript.len() < before + step {
+            break;
+        }
+        assert!(
+            matches!(
+                outcome,
+                Some(
+                    Outcome::Failed(_)
+                        | Outcome::Unknown
+                        | Outcome::Completed(_)
+                        | Outcome::Refused(_)
+                )
+            ),
+            "step {step}: {outcome:?}"
+        );
+        step += 1;
+    }
+    assert!(step > 10, "pairing has more than ten steps, got {step}");
+}
+
+#[test]
+fn an_offline_pair_survives_a_host_failure_at_every_step() {
+    offline_pair_survives_a_fault_at_every_step(Fault::HostFails);
+}
+
+#[test]
+fn an_offline_pair_survives_a_timeout_at_every_step() {
+    offline_pair_survives_a_fault_at_every_step(Fault::BleTimeout);
+}
+
+#[test]
+fn an_offline_pair_survives_a_disconnect_at_every_step() {
+    offline_pair_survives_a_fault_at_every_step(Fault::BleDisconnected);
+}
+
+#[test]
+fn an_offline_pair_survives_an_encryption_error_at_every_step() {
+    offline_pair_survives_a_fault_at_every_step(Fault::BleStatus(0x8A));
+}
+
+#[test]
+fn an_offline_pair_survives_a_counter_error_at_every_step() {
+    offline_pair_survives_a_fault_at_every_step(Fault::BleStatus(0x8B));
+}
+
+/// A session blob with the given serial and no provisioned credentials.
+fn no_cred_blob(serial: u32) -> Vec<u8> {
+    let mut body = b"YB".to_vec();
+    body.extend([1, 0]); // version, flags
+    body.extend(MAC);
+    body.extend(serial.to_le_bytes());
+    body.extend([0x42; KEY_LEN]); // session key
+    body.extend((-1i64).to_le_bytes()); // write counter
+    body.extend((-1i64).to_le_bytes()); // read counter
+    body.extend(0u32.to_le_bytes()); // epoch
+    body.extend(0i64.to_le_bytes()); // validity
+    body.push(0); // validity kind
+    body.extend([7u8; 16]); // nonce prefix
+    body.push(0); // credential count
+    body.extend(e2e_support::crc32(&body).to_le_bytes());
+    body
+}
+
+#[test]
+fn an_offline_pair_reads_the_offer_with_no_credential_when_none_can_be_derived() {
+    // A record with no provisioned credentials and a serial that has no MAC derives no L2 password,
+    // so the ladder is empty and the offer is read straight away (the unauthorised pump refuses it).
+    let no_mac_serial = 10_000_000 + 0x0100_0000;
+    let mut run = Run::new(sim(), &Blob::default());
+    run.harness
+        .store
+        .insert(Slot::Session, no_cred_blob(no_mac_serial));
+    run.restart();
+    let outcome = run.run(Command::Pair {
+        address: Address::new(MAC),
+        server_key: Some(KeyRef::new("server")),
+    });
+    assert!(
+        matches!(outcome, Outcome::Failed(_) | Outcome::Unknown),
+        "{outcome:?}"
+    );
+    assert!(run.harness.transcript.iter().any(|l| l.contains("Ble")));
+}
+
+/// A pump that answers the key offer read with fixed bytes of the test's choosing.
+struct BadOffer(YpsoSim, Vec<u8>);
+
+impl SimDevice for BadOffer {
+    fn handle(&mut self, op: &BleOp, now: pump_shared::Timestamp) -> BleResult {
+        if let BleOp::Read { characteristic, .. } = op {
+            if *characteristic == uuids::NEW_PUBLIC_KEY {
+                return BleResult::Data(self.1.clone());
+            }
+        }
+        self.0.handle(op, now)
+    }
+
+    fn key_agree(&mut self, key: &pump_shared::KeyRef, peer: &[u8; 32]) -> Option<[u8; 32]> {
+        self.0.key_agree(key, peer)
+    }
+}
+
+fn pair_against(device: BadOffer) -> Outcome {
+    let mut run = Run::new(device, &Blob::default());
+    run.run(Command::Pair {
+        address: Address::new(MAC),
+        server_key: Some(KeyRef::new("server")),
+    })
+}
+
+#[test]
+fn an_offline_pair_rejects_an_offer_of_the_wrong_length() {
+    // A single well-formed frame, but the reassembled offer is too short.
+    let short = pump_ypso::Frames::split(&[1, 2, 3, 4]).unwrap()[0].clone();
+    assert_eq!(
+        pair_against(BadOffer(sim(), short)),
+        Outcome::Failed(Failure::Protocol)
+    );
+}
+
+#[test]
+fn an_offline_pair_rejects_an_offer_whose_frames_do_not_reassemble() {
+    // A first frame numbered 2-of-7: the reassembler rejects it outright.
+    let garbled = vec![pump_ypso::Frames::header(2, 7), 0];
+    assert_eq!(
+        pair_against(BadOffer(sim(), garbled)),
+        Outcome::Failed(Failure::Protocol)
+    );
+}
+
+#[test]
+fn an_offline_pair_steers_an_all_zero_random_prefix_away_from_zero() {
+    // When the platform's generator yields all zeros, the nonce prefix is forced off zero and the
+    // pair still completes.
+    let mut run = Run::new(sim(), &Blob::default());
+    run.harness.random = |len| vec![0u8; len];
+    let pump_public = run.harness.device.pump_public();
+    let session = derive(SERVER, pump_public);
+    assert_eq!(
+        run.run(Command::Pair {
+            address: Address::new(MAC),
+            server_key: Some(KeyRef::new("server")),
+        }),
+        Outcome::Completed(Report::Done)
+    );
+    assert_eq!(run.harness.device.key, Some(session));
+    // The stored nonce prefix (bytes 75..91) was steered off all-zero.
+    assert_ne!(run.harness.store[&Slot::Session][75..91], [0u8; 16]);
+}
+
+#[test]
+fn an_offline_pair_that_cannot_store_after_an_incomplete_write_fails_on_the_host() {
+    let pair = || Command::Pair {
+        address: Address::new(MAC),
+        server_key: Some(KeyRef::new("server")),
+    };
+    // Probe: time out the blob write to learn where the session wrap lands.
+    let mut probe = Run::new(sim(), &Blob::default());
+    probe
+        .harness
+        .write_faults
+        .insert(uuids::WRITE_CHALLENGE_UTC_APP_PUB_KEY, Fault::BleTimeout);
+    probe.run(pair());
+    let wrap = probe
+        .harness
+        .transcript
+        .iter()
+        .position(|l| l.starts_with("Wrap"))
+        .expect("the incomplete write still reaches the session wrap");
+    // Same timeout, and now fail the host wrap so the session cannot be persisted.
+    let mut run = Run::new(sim(), &Blob::default());
+    run.harness
+        .write_faults
+        .insert(uuids::WRITE_CHALLENGE_UTC_APP_PUB_KEY, Fault::BleTimeout);
+    run.harness.faults.insert(wrap + 1, Fault::HostFails);
+    assert_eq!(run.run(pair()), Outcome::Failed(Failure::Host));
+}
+
+#[test]
+fn an_offline_pair_counts_from_the_wall_clock_when_it_is_known() {
+    // With the wall clock known, the pairing counter is milliseconds since 1970 (strictly above any
+    // the pump already holds), not the fallback of 1.
+    const WALL_MILLIS: u64 = 1_763_000_000_000;
+    let mut run = Run::new(sim(), &Blob::default());
+    run.engine
+        .handle_wall_clock(UtcTime::from_unix_millis(WALL_MILLIS));
+    assert_eq!(
+        run.run(Command::Pair {
+            address: Address::new(MAC),
+            server_key: Some(KeyRef::new("server")),
+        }),
+        Outcome::Completed(Report::Done)
+    );
+    assert_eq!(run.harness.device.pairing_counter, WALL_MILLIS);
+}

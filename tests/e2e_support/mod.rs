@@ -16,7 +16,7 @@ pub const MAC: [u8; 6] = [0xEC, 0x2A, 0xF0, 0x01, 0x02, 0x03];
 pub const NOON: i64 = 9497 * 86_400 + 12 * 3600 + 60;
 pub const Y2K: u64 = 946_684_800;
 
-fn crc32(bytes: &[u8]) -> u32 {
+pub fn crc32(bytes: &[u8]) -> u32 {
     let mut crc = !0u32;
     for &byte in bytes {
         crc ^= u32::from(byte);

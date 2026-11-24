@@ -98,25 +98,28 @@ impl YpsoEngine {
     fn start(&mut self) {
         // The offline pair bootstraps its own session, so it runs whether or not a ctx exists (and
         // never through `ctx.run`, which has no plan for it). A pending stop takes precedence.
-        if self.stop.is_none() && matches!(self.queue.front(), Some((_, Command::Pair { .. }))) {
-            let (id, command) = self.queue.pop_front().expect("front just matched");
-            let Command::Pair {
-                address,
-                server_key,
-            } = command
-            else {
-                unreachable!("front just matched Command::Pair")
-            };
-            self.event(Event::Started { id });
-            let task = Box::pin(offline_pair(
-                self.io.clone(),
-                address,
-                server_key,
-                self.utc_offset,
-                self.variant,
-            ));
-            self.running = Some(Running::Pair(id, task));
-            return;
+        if self.stop.is_none() {
+            if let Some((
+                id,
+                Command::Pair {
+                    address,
+                    server_key,
+                },
+            )) = self.queue.front()
+            {
+                let (id, address, server_key) = (*id, *address, server_key.clone());
+                self.queue.pop_front();
+                self.event(Event::Started { id });
+                let task = Box::pin(offline_pair(
+                    self.io.clone(),
+                    address,
+                    server_key,
+                    self.utc_offset,
+                    self.variant,
+                ));
+                self.running = Some(Running::Pair(id, task));
+                return;
+            }
         }
         let Some(ctx) = self.ctx.clone() else {
             if let Some(id) = self.stop.take() {
