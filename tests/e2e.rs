@@ -1938,3 +1938,54 @@ fn an_offline_pair_on_an_opn_pump_is_cleanly_unsupported() {
     // Refused before connecting: no offer read against a pump with no CryptoService.
     assert!(!run.harness.transcript.iter().any(|l| l.contains("Ble")));
 }
+
+#[test]
+fn an_offline_pair_bootstraps_a_fresh_pump_from_the_address_alone() {
+    // A never-paired pump has no stored record: the serial is recovered from the address and the
+    // L2 app password is derived from it. The sim accepts that derived password.
+    let serial = pump_ypso::auth::serial_from_mac(MAC).expect("a YpsoPump MAC");
+    let password = pump_ypso::auth::derive_l2(serial).expect("the L2 secret is configured");
+    let mut device = sim();
+    device.password = password;
+    let mut run = Run::new(device, &Blob::default());
+    run.harness.store.remove(&Slot::Session);
+    run.restart();
+    assert_eq!(run.engine.state(), EngineState::Unpaired);
+
+    let pump_public = run.harness.device.pump_public();
+    let session = derive(SERVER, pump_public);
+    assert_eq!(
+        run.run(Command::Pair {
+            address: Address::new(MAC),
+            server_key: Some(KeyRef::new("server")),
+        }),
+        Outcome::Completed(Report::Done)
+    );
+    assert_eq!(run.engine.state(), EngineState::Paired);
+    assert_eq!(run.harness.device.key, Some(session));
+    assert_eq!(stored_session_key(&run), session);
+    // The bootstrapped session carries the derived serial and no provisioned passwords.
+    let stored = &run.harness.store[&Slot::Session];
+    assert_eq!(
+        u32::from_le_bytes(stored[10..14].try_into().unwrap()),
+        serial
+    );
+    assert_eq!(stored[91], 0);
+}
+
+#[test]
+fn an_offline_pair_with_no_record_and_a_foreign_address_is_refused() {
+    let mut run = Run::new(sim(), &Blob::default());
+    run.harness.store.remove(&Slot::Session);
+    run.restart();
+    assert_eq!(run.engine.state(), EngineState::Unpaired);
+    assert_eq!(
+        run.run(Command::Pair {
+            address: Address::new([0x00, 0x11, 0x22, 0x33, 0x44, 0x55]),
+            server_key: Some(KeyRef::new("server")),
+        }),
+        Outcome::Refused(Refusal::NotPaired)
+    );
+    // A non-YpsoPump address has no serial to bootstrap from: refused before any BLE.
+    assert!(!run.harness.transcript.iter().any(|l| l.contains("Ble")));
+}

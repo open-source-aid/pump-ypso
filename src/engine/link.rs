@@ -703,28 +703,33 @@ pub(crate) async fn offline_pair(
     let Some(server_key) = server_key else {
         return (Outcome::Refused(Refusal::NotPaired), None);
     };
-    let Some(provision) = provisioning(&io).await else {
-        return (Outcome::Refused(Refusal::NotPaired), None);
+    // The serial and credentials come from a provisioning record when one exists, otherwise they are
+    // fabricated for a first-time ("take the server key") pair: the serial is the inverse of the
+    // address encoding and the L2 app password is derived from it (added at authorisation time,
+    // below and on every later connect, never persisted). A keyless record is an OPN pump with no
+    // key exchange — pairing is not applicable, so refuse it cleanly; a MISSING record is a fresh
+    // non-OPN pump to bootstrap, not an OPN pump.
+    let (serial, passwords) = match provisioning(&io).await {
+        Some(provision) if provision.crypto.is_none() => {
+            return (Outcome::Refused(Refusal::Unsupported), None);
+        }
+        Some(provision) => (provision.serial, provision.passwords),
+        None => match crate::auth::serial_from_mac(address.to_bytes()) {
+            Some(serial) => (serial, Vec::new()),
+            None => return (Outcome::Refused(Refusal::NotPaired), None),
+        },
     };
-    // An OPN pump has no CryptoService and no key to exchange: its provisioning record is keyless.
-    // Pairing is not applicable, so refuse cleanly (never by failing to read a missing offer).
-    if provision.crypto.is_none() {
-        return (Outcome::Refused(Refusal::Unsupported), None);
-    }
-    // The stored session keeps the provisioned credentials; the derived L2 rung is added at
-    // authorisation time (here and on every later connect), never persisted.
-    let passwords = provision.passwords.clone();
-    let auth_ladder = crate::auth::ladder(provision.serial, &passwords);
+    let auth_ladder = crate::auth::ladder(serial, &passwords);
     let mut ctx = Ctx::new(
         io.clone(),
         Session {
             mac: address.to_bytes(),
-            serial: provision.serial,
+            serial,
             crypto: None,
             fingerprint: 1,
             counters: (-1, -1, 0),
             prefix: [1u8; 16],
-            passwords: passwords.clone(),
+            passwords,
         },
         Nonces::resume([1u8; 16], None),
         utc_offset,

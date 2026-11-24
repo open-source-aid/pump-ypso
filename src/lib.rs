@@ -3,7 +3,7 @@
 
 extern crate alloc;
 
-mod auth;
+pub mod auth;
 pub mod counters;
 mod driver;
 mod engine;

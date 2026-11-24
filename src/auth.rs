@@ -20,7 +20,7 @@ pub(crate) const AUTH_SECRET_L2: [u8; 10] =
     [0x4F, 0xC2, 0x45, 0x4D, 0x9B, 0x81, 0x59, 0xA4, 0x93, 0xBB];
 
 /// The one-byte ladder code the derived L2 rung is stored under.
-pub(crate) const L2_CODE: u8 = b'L';
+pub const L2_CODE: u8 = b'L';
 
 /// Ypsomed OUI: every YpsoPump's BLE MAC begins with these three bytes.
 const YPSO_OUI: [u8; 3] = [0xEC, 0x2A, 0xF0];
@@ -33,7 +33,7 @@ pub(crate) fn supplied() -> bool {
 /// Reconstruct a YpsoPump's BLE MAC from its serial: the OUI followed by the low three bytes of the
 /// reduced serial, big-endian (Ypsomed `YpsoCrypto.serialToMac`). `None` when the reduced serial
 /// does not fit three bytes.
-pub(crate) fn mac_from_serial(serial: u32) -> Option<[u8; 6]> {
+pub fn mac_from_serial(serial: u32) -> Option<[u8; 6]> {
     let num = if serial > 10_000_000 {
         serial - 10_000_000
     } else {
@@ -52,9 +52,21 @@ pub(crate) fn mac_from_serial(serial: u32) -> Option<[u8; 6]> {
     ])
 }
 
+/// Recover a YpsoPump's serial from its BLE MAC: the inverse of [`mac_from_serial`] over the real
+/// serial range (`10_000_001..=26_777_215`). `None` when the MAC does not carry the Ypsomed OUI, so
+/// a non-YpsoPump address yields no serial and cannot be bootstrapped. For every real serial `s`,
+/// `serial_from_mac(mac_from_serial(s)) == Some(s)`.
+pub fn serial_from_mac(mac: [u8; 6]) -> Option<u32> {
+    if mac[0..3] != YPSO_OUI {
+        return None;
+    }
+    let num = (u32::from(mac[3]) << 16) | (u32::from(mac[4]) << 8) | u32::from(mac[5]);
+    Some(num + 10_000_000)
+}
+
 /// Derive the L2 app password `MD5(mac ‖ AUTH_SECRET_L2)`, or `None` when no secret is configured
 /// or the serial has no valid MAC.
-pub(crate) fn derive_l2(serial: u32) -> Option<[u8; 16]> {
+pub fn derive_l2(serial: u32) -> Option<[u8; 16]> {
     supplied()
         .then(|| derive(serial, &AUTH_SECRET_L2))
         .flatten()
@@ -73,7 +85,7 @@ fn derive(serial: u32, salt: &[u8]) -> Option<[u8; 16]> {
 /// The credential ladder the driver presents: the provisioned credentials, then the derived L2 rung
 /// as a fallback (when a secret is configured). A provisioned credential is always tried first; the
 /// derived rung only matters when none is provisioned (offline bootstrap) or they all fail.
-pub(crate) fn ladder(serial: u32, provisioned: &[(u8, [u8; 16])]) -> Vec<(u8, [u8; 16])> {
+pub fn ladder(serial: u32, provisioned: &[(u8, [u8; 16])]) -> Vec<(u8, [u8; 16])> {
     let mut rungs = provisioned.to_vec();
     if let Some(password) = derive_l2(serial) {
         rungs.push((L2_CODE, password));
@@ -102,6 +114,23 @@ mod tests {
     #[test]
     fn a_reduced_serial_wider_than_three_bytes_has_no_mac() {
         assert_eq!(mac_from_serial(10_000_000 + 0x0100_0000), None);
+    }
+
+    #[test]
+    fn the_serial_round_trips_through_the_mac() {
+        // Every real-range serial recovers from the MAC it maps to (bottom, middle and top).
+        for serial in [10_000_001, 10_155_555, 26_777_215] {
+            let mac = mac_from_serial(serial).unwrap();
+            assert_eq!(serial_from_mac(mac), Some(serial));
+            // And the MAC recovers from the serial it maps to.
+            assert_eq!(mac_from_serial(serial_from_mac(mac).unwrap()), Some(mac));
+        }
+    }
+
+    #[test]
+    fn a_mac_without_the_ypso_oui_has_no_serial() {
+        assert_eq!(serial_from_mac([0x00, 0x11, 0x22, 0x33, 0x44, 0x55]), None);
+        assert_eq!(serial_from_mac([0xEC, 0x2A, 0xF1, 0x00, 0x00, 0x01]), None);
     }
 
     #[test]
