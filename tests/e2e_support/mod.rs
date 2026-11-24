@@ -93,7 +93,10 @@ pub fn engine() -> Box<dyn Engine> {
         manufacturer: None,
         rssi: -50,
     };
-    let variant = DRIVER.matches(&adv).expect("a YpsoPump advertisement").variant;
+    let variant = DRIVER
+        .matches(&adv)
+        .expect("a YpsoPump advertisement")
+        .variant;
     DRIVER.new_engine(variant, Config::default())
 }
 
