@@ -3,9 +3,9 @@ use alloc::boxed::Box;
 use core::time::Duration;
 
 use pump_shared::{
-    Advertisement, BasalRate, BleMatch, Class, CommandKind, Config, Driver, DriverInfo, Engine,
-    Feature, GattChar, InsulinAmount, Kind, Nominal, NominalBounds, NominalCapabilities,
-    NominalLimits, Percent, Slot, Tier, Variant,
+    Address, Advertisement, BasalRate, BleMatch, Class, CommandKind, Config, Driver, DriverInfo,
+    DriverMatch, Engine, Feature, GattChar, InsulinAmount, Kind, Nominal, NominalBounds,
+    NominalCapabilities, NominalLimits, Percent, Slot, Tier, Variant,
 };
 
 use crate::engine::YpsoEngine;
@@ -292,8 +292,24 @@ impl Driver for Ypso {
         &INFO
     }
 
-    fn matches(&self, adv: &Advertisement<'_>) -> Option<&'static Variant> {
-        INFO.ble.matches(adv).then_some(&VARIANTS[0])
+    fn matches(&self, adv: &Advertisement<'_>) -> Option<DriverMatch> {
+        if !INFO.ble.matches(adv) {
+            return None;
+        }
+        // The advertised name is `YpsoPump_<serial>`; the serial yields the MAC that a platform like
+        // iOS never exposes, so the harness can bind on it. A non-numeric or out-of-range suffix
+        // leaves the address underived.
+        let address = adv
+            .name
+            .and_then(|name| name.strip_prefix("YpsoPump_"))
+            .and_then(|serial| serial.parse::<u32>().ok())
+            .and_then(crate::auth::mac_from_serial)
+            .map(Address::new);
+        Some(DriverMatch {
+            driver_id: INFO.id,
+            variant: &VARIANTS[0],
+            address,
+        })
     }
 
     fn new_engine(&self, variant: &'static Variant, config: Config) -> Box<dyn Engine> {
@@ -318,6 +334,44 @@ mod tests {
             assert_eq!(variant.nominal, None);
             assert_eq!(DRIVER.info().nominal_for(variant), &NOMINAL);
         }
+    }
+
+    #[test]
+    fn matches_derives_the_binding_address_from_the_advertised_serial() {
+        fn advert(name: Option<&str>) -> Advertisement<'_> {
+            Advertisement {
+                address: Address::new([0; 6]),
+                name,
+                service_uuids: &[],
+                manufacturer: None,
+                rssi: -50,
+            }
+        }
+        // A YpsoPump advert → the variant plus the MAC derived from the serial in the name.
+        let m = DRIVER.matches(&advert(Some("YpsoPump_10155555"))).unwrap();
+        assert_eq!(m.driver_id, INFO.id);
+        assert_eq!(m.variant.id, VARIANTS[0].id);
+        assert_eq!(
+            m.address,
+            crate::auth::mac_from_serial(10_155_555).map(Address::new)
+        );
+        assert!(m.address.is_some());
+        // Matched, but the suffix is not a serial → no derived address.
+        assert_eq!(
+            DRIVER.matches(&advert(Some("YpsoPump_x"))).unwrap().address,
+            None
+        );
+        // Matched, but the serial is out of MAC range → no derived address.
+        assert_eq!(
+            DRIVER
+                .matches(&advert(Some("YpsoPump_999999999")))
+                .unwrap()
+                .address,
+            None
+        );
+        // A foreign advert, and one with no name → no match.
+        assert!(DRIVER.matches(&advert(Some("Other"))).is_none());
+        assert!(DRIVER.matches(&advert(None)).is_none());
     }
 
     #[test]
