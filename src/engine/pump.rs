@@ -1,8 +1,10 @@
 use alloc::vec;
 use core::time::Duration;
 
+#[cfg(feature = "diag")]
+use pump_shared::Event;
 use pump_shared::{
-    Basal, BasalRate, Bolus, Bounds, Capabilities, Event, Extended, Failure, InsulinAmount, Limits,
+    Basal, BasalRate, Bolus, Bounds, Capabilities, Extended, Failure, InsulinAmount, Limits,
     Percent, PumpMode, PumpStatus, PumpTime, TempBasalRate, TherapyState, Tier,
 };
 
@@ -192,9 +194,10 @@ impl Device {
 impl Ctx {
     pub(crate) async fn system(&self) -> Step<System> {
         let bytes = self.read_sized(Characteristic::GetSystemStatus, 14).await?;
-        // Diagnostic: the raw delivery-mode byte. Its run/stop enumeration is not
-        // established by any reference we have, so we log the ground-truth value to
-        // map it against a device confirmed running vs. stopped on its own screen.
+        // Diagnostic (feature `diag`): the raw delivery-mode byte, for pinning an
+        // unknown device-state value against hardware. Confirmed on a real pump:
+        // 10 = running, 3 = stopped — carries no reservoir, battery or clock.
+        #[cfg(feature = "diag")]
         self.emit(Event::Log {
             level: 1,
             line: alloc::format!("ypso sys0={}", bytes[0]),
@@ -205,6 +208,7 @@ impl Ctx {
     pub(crate) async fn bolus_state(&self) -> Step<BolusState> {
         let extended = self.extended();
         let bytes = self.read_sized(Characteristic::GetBolusStatus, 13).await?;
+        #[cfg(feature = "diag")]
         self.emit(Event::Log {
             level: 1,
             line: alloc::format!("ypso bolus0={}", bytes[0]),

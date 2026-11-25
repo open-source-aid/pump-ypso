@@ -15,6 +15,10 @@ std = ["pump-shared/std"]
 sim = ["pump-shared/sim", "dep:curve25519-dalek"]
 opn = []
 delivery = []
+# Emit the raw protocol state bytes (system/bolus status byte 0) as debug logs.
+# Off by default: a diagnostic for pinning down an unknown device-state value
+# against hardware, not something to run on every status read in production.
+diag = []
 
 [dependencies]
 chacha20 = { version = "0.9", default-features = false }
