@@ -25,6 +25,17 @@ pub(crate) fn milli(hundredths: i32) -> u32 {
     hundredths.max(0).unsigned_abs() * 10
 }
 
+/// Lower-case hex of a frame, for the `diag` status dumps.
+#[cfg(feature = "diag")]
+fn diag_hex(bytes: &[u8]) -> alloc::string::String {
+    use core::fmt::Write;
+    let mut hex = alloc::string::String::new();
+    for byte in bytes {
+        let _ = write!(hex, "{byte:02x}");
+    }
+    hex
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) struct System {
     pub(crate) suspended: bool,
@@ -200,7 +211,11 @@ impl Ctx {
         #[cfg(feature = "diag")]
         self.emit(Event::Log {
             level: 1,
-            line: alloc::format!("ypso sys0={}", bytes[0]),
+            line: alloc::format!(
+                "ypso sys raw len={} bytes={}",
+                bytes.len(),
+                diag_hex(&bytes)
+            ),
         });
         System::decode(&bytes)
     }
@@ -208,12 +223,31 @@ impl Ctx {
     pub(crate) async fn bolus_state(&self) -> Step<BolusState> {
         let extended = self.extended();
         let bytes = self.read_sized(Characteristic::GetBolusStatus, 13).await?;
+        // Diagnostic (feature `diag`): the raw bolus-status frame plus which
+        // layout it was read against (`ext` selects delivered@5/total@9 vs
+        // delivered@1/total@5) and what that yields, to pin a "0u of 0u" on the
+        // wire bytes rather than guess the offsets. No key material is logged.
         #[cfg(feature = "diag")]
         self.emit(Event::Log {
             level: 1,
-            line: alloc::format!("ypso bolus0={}", bytes[0]),
+            line: alloc::format!(
+                "ypso bolus raw ext={extended} len={} bytes={}",
+                bytes.len(),
+                diag_hex(&bytes)
+            ),
         });
-        BolusState::decode(&bytes, extended)
+        let state = BolusState::decode(&bytes, extended)?;
+        #[cfg(feature = "diag")]
+        self.emit(Event::Log {
+            level: 1,
+            line: alloc::format!(
+                "ypso bolus decoded delivered={} total={} running={}",
+                state.delivered.milliunits(),
+                state.total.milliunits(),
+                state.running
+            ),
+        });
+        Ok(state)
     }
 
     pub(crate) fn extended(&self) -> bool {
