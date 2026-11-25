@@ -191,6 +191,15 @@ fn an_unconfirmed_dose_is_unknown() {
         run.run(Command::Bolus { amount: units(500) }),
         Outcome::Unknown
     );
+    // A rate bolus whose micro-doses "succeed" but never reach history waits out
+    // the settle retries and still finds nothing, so it stays Unknown.
+    assert_eq!(
+        run.run(Command::RateBolus {
+            amount: units(500),
+            duration: Duration::from_secs(120),
+        }),
+        Outcome::Unknown
+    );
     assert_eq!(run.run(extended(2_000)), Outcome::Unknown);
     let profile = BasalProfile::new(vec![BasalSegment {
         start: Duration::ZERO,

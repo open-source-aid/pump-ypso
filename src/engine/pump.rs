@@ -80,8 +80,17 @@ pub(crate) struct BolusState {
 impl BolusState {
     fn decode(bytes: &[u8], extended: bool) -> Step<Self> {
         let pick = |at| InsulinAmount::from_milliunits(milli(le_i32(bytes, at)));
+        // A status byte of 0 is "no immediate bolus": the frame clears the instant
+        // delivery ends, so its amount fields carry nothing to read. Guarding on it
+        // reports an ended bolus as absent rather than as a real zero-unit dose,
+        // and stops a future firmware that clears by status alone from being read
+        // off stale amounts.
         if !extended {
-            let (delivered, total) = (pick(1), pick(5));
+            let (delivered, total) = if bytes[0] == 0 {
+                (InsulinAmount::ZERO, InsulinAmount::ZERO)
+            } else {
+                (pick(1), pick(5))
+            };
             return Ok(Self {
                 running: running(bytes[0], delivered, total),
                 delivered,
@@ -92,11 +101,15 @@ impl BolusState {
         if bytes.len() != 44 || !crc16_ok(bytes) {
             return Err(Halt::Failed(Failure::Protocol));
         }
-        let (delivered, total) = (pick(5), pick(9));
-        let (delivered, total) = if pick(30) > InsulinAmount::ZERO && total == InsulinAmount::ZERO {
-            (pick(26), pick(30))
+        let (delivered, total) = if bytes[0] == 0 {
+            (InsulinAmount::ZERO, InsulinAmount::ZERO)
         } else {
-            (delivered, total)
+            let (delivered, total) = (pick(5), pick(9));
+            if pick(30) > InsulinAmount::ZERO && total == InsulinAmount::ZERO {
+                (pick(26), pick(30))
+            } else {
+                (delivered, total)
+            }
         };
         Ok(Self {
             running: running(bytes[0], delivered, total),

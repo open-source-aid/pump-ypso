@@ -144,14 +144,19 @@ impl Ctx {
             let Ok(state) = self.bolus_state().await else {
                 break;
             };
-            self.apply(Transition::BolusProgressed {
-                delivered: state.delivered,
-            });
-            self.emit(Event::Progress {
-                id: self.current.get(),
-                delivered: state.delivered,
-                requested: amount,
-            });
+            // Skip a cleared frame's zero: the status empties the instant delivery
+            // ends, and a spurious zero would flicker the running total to nothing
+            // just as the bolus completes.
+            if state.delivered != InsulinAmount::ZERO {
+                self.apply(Transition::BolusProgressed {
+                    delivered: state.delivered,
+                });
+                self.emit(Event::Progress {
+                    id: self.current.get(),
+                    delivered: state.delivered,
+                    requested: amount,
+                });
+            }
             if !state.running {
                 break;
             }
@@ -190,7 +195,21 @@ impl Ctx {
                 });
             }
         }
-        let (delivered, _) = self.replay(start).await?;
+        // The completed records lag the live status, which clears the instant
+        // delivery ends, so wait briefly for history to show the dose before
+        // concluding. A dose that lands here reports its real amount; only a link
+        // that stays silent (the read errors) or a dose history never shows falls
+        // through to Unknown — the one outcome a host must not auto-retry.
+        let mut delivered;
+        let mut tries = SETTLE;
+        loop {
+            delivered = self.replay(start).await?.0;
+            tries = tries.saturating_sub(1);
+            if delivered != InsulinAmount::ZERO || tries == 0 {
+                break;
+            }
+            io::sleep(&self.io, POLL).await;
+        }
         let offset = u64::from(delivered.milliunits() / 10) % MARKER_MOD;
         let marked = self.write_marker(offset).await?;
         let (confirmed, marker) = self.replay(start).await?;
@@ -211,14 +230,19 @@ impl Ctx {
             let Ok(state) = self.bolus_state().await else {
                 break;
             };
-            self.apply(Transition::BolusProgressed {
-                delivered: state.delivered,
-            });
-            self.emit(Event::Progress {
-                id: self.current.get(),
-                delivered: state.delivered,
-                requested: amount,
-            });
+            // Skip a cleared frame's zero: the status empties the instant delivery
+            // ends, and a spurious zero would flicker the running total to nothing
+            // just as the bolus completes.
+            if state.delivered != InsulinAmount::ZERO {
+                self.apply(Transition::BolusProgressed {
+                    delivered: state.delivered,
+                });
+                self.emit(Event::Progress {
+                    id: self.current.get(),
+                    delivered: state.delivered,
+                    requested: amount,
+                });
+            }
             if !state.running {
                 break;
             }
