@@ -2,6 +2,8 @@ use alloc::boxed::Box;
 
 use core::time::Duration;
 
+#[cfg(feature = "diag")]
+use pump_shared::NotifyKind;
 use pump_shared::{
     Address, Advertisement, BasalRate, BleMatch, Class, CommandKind, Config, Driver, DriverInfo,
     DriverMatch, Engine, Feature, GattChar, InsulinAmount, Kind, Nominal, NominalBounds,
@@ -235,6 +237,17 @@ static INFO: DriverInfo = DriverInfo {
         gatt!("bolus status", CONTROL_SERVICE, GET_BOLUS_STATUS),
         gatt!("start stop temp basal", CONTROL_SERVICE, START_STOP_TBR),
         gatt!("system status", CONTROL_SERVICE, GET_SYSTEM_STATUS),
+        // Under `diag` the engine subscribes to the bolus-status notification to
+        // capture its frames on hardware (see `Ctx::diag_notification`). Rule E9
+        // keeps this declaration and the subscription in lockstep, so both are
+        // gated together: no notify is declared unless the engine subscribes.
+        #[cfg(feature = "diag")]
+        GattChar {
+            name: "bolus notification",
+            service: CONTROL_SERVICE,
+            characteristic: CONTROL_NOTIFY,
+            notify: Some(NotifyKind::Notification),
+        },
         gatt!("extended read", CRYPTO_SERVICE, EXTENDED_READ),
         gatt!("pairing public key", CRYPTO_SERVICE, NEW_PUBLIC_KEY),
         gatt!(

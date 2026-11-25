@@ -81,7 +81,16 @@ fn connects_and_reads_status() {
     assert_eq!(info.firmware, "V05.02.03");
     assert_eq!(run.engine.therapy().mode, PumpMode::Running);
     assert_eq!(run.status().therapy.mode, PumpMode::Running);
+    // The engine polls and never subscribes — except under `diag`, which adds the
+    // bolus-status notification subscription for hardware capture.
+    #[cfg(not(feature = "diag"))]
     assert!(!run
+        .harness
+        .transcript
+        .iter()
+        .any(|line| line.contains("Subscribe")));
+    #[cfg(feature = "diag")]
+    assert!(run
         .harness
         .transcript
         .iter()
@@ -1824,7 +1833,7 @@ fn every_characteristic_the_engine_touches_is_declared() {
     {
         let unused: Vec<&String> = declared
             .keys()
-            .filter(|key| !device.touched.contains(*key))
+            .filter(|key| !device.touched.contains(*key) && !device.subscribed.contains_key(*key))
             .collect();
         assert!(unused.is_empty(), "declared but never touched: {unused:?}");
     }

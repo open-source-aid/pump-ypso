@@ -12,8 +12,9 @@ use std::time::Duration;
 use e2e_support::*;
 use pump_shared::{
     Action, Basal, BasalProfile, BasalRate, BasalSegment, BleOp, BleResult, Bolus, Command,
-    Completion, CompletionError, Driver, EngineState, Event, Extended, Failure, OpId, Outcome,
-    Percent, PumpMode, Refusal, Report, Secret, Sequence, Slot, TempBasalRate, Timestamp, Uuid,
+    Completion, CompletionError, Driver, EngineState, Event, Extended, Failure, Notification, OpId,
+    Outcome, Percent, PumpMode, Refusal, Report, Secret, Sequence, Slot, TempBasalRate, Timestamp,
+    Uuid,
 };
 use pump_ypso::protocol::{setting, uuids, NONCE_LEN};
 use pump_ypso::sim::{crc16, YpsoSim};
@@ -621,7 +622,11 @@ fn describes_the_driver() {
         info.accepts(pump_shared::CommandKind::Bolus),
         cfg!(feature = "delivery")
     );
-    assert!(info.listened().next().is_none());
+    // Pure polling listens to nothing; `diag` adds the one notification it captures.
+    assert_eq!(
+        info.listened().count(),
+        if cfg!(feature = "diag") { 1 } else { 0 }
+    );
     assert_eq!(
         info.variants.len(),
         if cfg!(feature = "opn") { 2 } else { 1 }
@@ -841,4 +846,60 @@ fn a_system_status_with_a_bad_crc_is_a_protocol_error() {
     run.status();
     run.harness.device.answer = Some((uuids::GET_SYSTEM_STATUS, status));
     assert_eq!(run.run(Command::Status), Outcome::Failed(Failure::Protocol));
+}
+
+#[cfg(feature = "diag")]
+#[test]
+fn a_diag_build_decodes_and_logs_the_bolus_notification() {
+    fn logs(run: &mut Run<YpsoSim>) -> Vec<String> {
+        let mut lines = Vec::new();
+        while let Some(event) = run.engine.poll_event() {
+            if let Event::Log { line, .. } = event {
+                lines.push(line);
+            }
+        }
+        lines
+    }
+    let notify = |data: Vec<u8>, characteristic| Notification {
+        service: uuids::CONTROL_SERVICE,
+        characteristic,
+        data,
+    };
+
+    // Before a link exists there is no session to decode against: the
+    // notification is dropped without panicking and emits nothing.
+    let mut fresh = engine();
+    fresh.handle_notification(notify(vec![0; 5], uuids::CONTROL_NOTIFY));
+    assert!(fresh.poll_event().is_none());
+
+    let mut run = Run::new(sim(), &Blob::default());
+    logs(&mut run); // drain the connect/status logs.
+
+    // A sealed 10-byte frame: fast_status(0), fast_seq(1-4), slow_status(5), slow_seq(6-9).
+    let mut payload = vec![1u8];
+    payload.extend(7u32.to_le_bytes());
+    payload.push(2);
+    payload.extend(9u32.to_le_bytes());
+    let sealed = Crypto::new(KEY)
+        .seal(&payload, 0, 1, &[0u8; NONCE_LEN])
+        .unwrap();
+    run.engine
+        .handle_notification(notify(sealed, uuids::CONTROL_NOTIFY));
+    assert_eq!(logs(&mut run), ["ypso notify fast=1/7 slow=2/9 len=62"]);
+
+    // A frame on another characteristic is ignored; an undecodable one logs raw.
+    run.engine
+        .handle_notification(notify(vec![0; 5], uuids::GET_SYSTEM_STATUS));
+    run.engine
+        .handle_notification(notify(vec![0; 5], uuids::CONTROL_NOTIFY));
+    assert_eq!(logs(&mut run), ["ypso notify undecoded len=5"]);
+
+    // A frame that decrypts cleanly but is too short to carry the ten fields is
+    // logged raw too, not decoded from out-of-range bytes.
+    let short = Crypto::new(KEY)
+        .seal(&[0u8; 5], 0, 2, &[0u8; NONCE_LEN])
+        .unwrap();
+    run.engine
+        .handle_notification(notify(short, uuids::CONTROL_NOTIFY));
+    assert_eq!(logs(&mut run), ["ypso notify undecoded len=57"]);
 }

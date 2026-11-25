@@ -334,7 +334,12 @@ impl Engine for YpsoEngine {
         self.run();
     }
 
-    fn handle_notification(&mut self, _notification: Notification) {}
+    fn handle_notification(&mut self, _notification: Notification) {
+        #[cfg(feature = "diag")]
+        if let Some(ctx) = &self.ctx {
+            ctx.diag_notification(&_notification);
+        }
+    }
 
     fn poll_action(&mut self) -> Option<Action> {
         self.io.borrow_mut().poll_action()

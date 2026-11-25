@@ -6,6 +6,8 @@ use pump_shared::{
     Address, BleOp, BleResult, Class, CommandId, Failure, KeyRef, Outcome, Refusal, Report, Secret,
     Slot,
 };
+#[cfg(feature = "diag")]
+use pump_shared::{Event, Notification, NotifyKind};
 
 use super::crc::crc32_update;
 use super::io::{self, Shared};
@@ -459,6 +461,23 @@ impl Ctx {
         if (upper << 16 | lower) != self.session.serial || !versions.known() || refused {
             return Err(Halt::Failed(Failure::Protocol));
         }
+        // Subscribe to the bolus-status notification (feature `diag`) to capture
+        // its frames on hardware. The notification is advisory — polling stays
+        // the source of truth — so a characteristic-level rejection is ignored,
+        // but a link-fatal result propagates through the normal connect teardown.
+        #[cfg(feature = "diag")]
+        {
+            let subscribed = self
+                .ble(BleOp::Subscribe {
+                    service: uuids::CONTROL_SERVICE,
+                    characteristic: uuids::CONTROL_NOTIFY,
+                    kind: NotifyKind::Notification,
+                })
+                .await;
+            if matches!(subscribed, BleResult::Disconnected | BleResult::Timeout) {
+                return Err(read_failed(subscribed));
+            }
+        }
         Ok(())
     }
 
@@ -503,6 +522,41 @@ impl Ctx {
         if self.link.replace(None).is_some() {
             self.ble(BleOp::Disconnect).await;
         }
+    }
+
+    /// Decode and log a raw bolus-status notification frame (feature `diag`).
+    ///
+    /// `Crypto::open` is pure — it decrypts without touching the session read
+    /// counter — so logging a notification never perturbs the polled-read flow.
+    /// The plaintext layout follows the Python reference: `fast_status`(0),
+    /// `fast_sequence`(1-4 LE), `slow_status`(5), `slow_sequence`(6-9 LE). A
+    /// frame that does not decode — no session key, a chunked frame past the ATT
+    /// MTU, a bad tag — is logged raw with its length, which is what pins the
+    /// wire format down on the bench (`to-confirm.md` item 1).
+    #[cfg(feature = "diag")]
+    pub(crate) fn diag_notification(&self, notification: &Notification) {
+        if notification.characteristic != uuids::CONTROL_NOTIFY {
+            return;
+        }
+        let decoded = self
+            .session
+            .crypto
+            .as_ref()
+            .and_then(|crypto| crypto.open(&notification.data).ok())
+            .filter(|opened| opened.payload.len() >= 10)
+            .map(|opened| {
+                let p = &opened.payload;
+                let seq = |at: usize| u32::from_le_bytes([p[at], p[at + 1], p[at + 2], p[at + 3]]);
+                (p[0], seq(1), p[5], seq(6))
+            });
+        let line = match decoded {
+            Some((fast_status, fast_seq, slow_status, slow_seq)) => alloc::format!(
+                "ypso notify fast={fast_status}/{fast_seq} slow={slow_status}/{slow_seq} len={}",
+                notification.data.len()
+            ),
+            None => alloc::format!("ypso notify undecoded len={}", notification.data.len()),
+        };
+        self.emit(Event::Log { level: 1, line });
     }
 }
 
