@@ -538,6 +538,10 @@ impl Ctx {
         if notification.characteristic != uuids::CONTROL_NOTIFY {
             return;
         }
+        // Always log the raw frame: on this hardware the notification is 13 bytes
+        // of plaintext — far too short to be a sealed frame — so `open` cannot
+        // decode it and the bytes themselves are what reveal the layout.
+        let raw = super::pump::diag_hex(&notification.data);
         let decoded = self
             .session
             .crypto
@@ -551,10 +555,12 @@ impl Ctx {
             });
         let line = match decoded {
             Some((fast_status, fast_seq, slow_status, slow_seq)) => alloc::format!(
-                "ypso notify fast={fast_status}/{fast_seq} slow={slow_status}/{slow_seq} len={}",
+                "ypso notify fast={fast_status}/{fast_seq} slow={slow_status}/{slow_seq} len={} bytes={raw}",
                 notification.data.len()
             ),
-            None => alloc::format!("ypso notify undecoded len={}", notification.data.len()),
+            None => {
+                alloc::format!("ypso notify undecoded len={} bytes={raw}", notification.data.len())
+            }
         };
         self.emit(Event::Log { level: 1, line });
     }

@@ -885,14 +885,21 @@ fn a_diag_build_decodes_and_logs_the_bolus_notification() {
         .unwrap();
     run.engine
         .handle_notification(notify(sealed, uuids::CONTROL_NOTIFY));
-    assert_eq!(logs(&mut run), ["ypso notify fast=1/7 slow=2/9 len=62"]);
+    let logged = logs(&mut run);
+    assert_eq!(logged.len(), 1);
+    assert!(
+        logged[0].starts_with("ypso notify fast=1/7 slow=2/9 len=62 bytes="),
+        "{}",
+        logged[0]
+    );
 
     // A frame on another characteristic is ignored; an undecodable one logs raw.
     run.engine
         .handle_notification(notify(vec![0; 5], uuids::GET_SYSTEM_STATUS));
     run.engine
         .handle_notification(notify(vec![0; 5], uuids::CONTROL_NOTIFY));
-    assert_eq!(logs(&mut run), ["ypso notify undecoded len=5"]);
+    let logged = logs(&mut run);
+    assert_eq!(logged, ["ypso notify undecoded len=5 bytes=0000000000"]);
 
     // A frame that decrypts cleanly but is too short to carry the ten fields is
     // logged raw too, not decoded from out-of-range bytes.
@@ -901,5 +908,11 @@ fn a_diag_build_decodes_and_logs_the_bolus_notification() {
         .unwrap();
     run.engine
         .handle_notification(notify(short, uuids::CONTROL_NOTIFY));
-    assert_eq!(logs(&mut run), ["ypso notify undecoded len=57"]);
+    let logged = logs(&mut run);
+    assert_eq!(logged.len(), 1);
+    assert!(
+        logged[0].starts_with("ypso notify undecoded len=57 bytes="),
+        "{}",
+        logged[0]
+    );
 }

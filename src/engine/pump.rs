@@ -27,7 +27,7 @@ pub(crate) fn milli(hundredths: i32) -> u32 {
 
 /// Lower-case hex of a frame, for the `diag` status dumps.
 #[cfg(feature = "diag")]
-fn diag_hex(bytes: &[u8]) -> alloc::string::String {
+pub(crate) fn diag_hex(bytes: &[u8]) -> alloc::string::String {
     use core::fmt::Write;
     let mut hex = alloc::string::String::new();
     for byte in bytes {
