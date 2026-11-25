@@ -71,6 +71,14 @@ fn plan_micro(
 fn completed_or(requested: InsulinAmount, delivered: InsulinAmount, duration: Duration) -> Outcome {
     if delivered == requested {
         Outcome::Completed(Report::Delivered(delivered))
+    } else if delivered == InsulinAmount::ZERO {
+        // A bolus we commanded, that history still reports as nothing. The record
+        // has not landed yet — `GetBolusStatus` clears the instant delivery ends,
+        // so the live status is already empty and history lags it. Reporting a
+        // definitive zero here would drop delivered insulin from the caller's IOB,
+        // the dangerous direction, so say the amount is unknown and let the caller
+        // reconcile it from history rather than trust a zero.
+        Outcome::Unknown
     } else {
         Outcome::Approximated(Approximation::Bolus {
             requested,
@@ -395,5 +403,38 @@ impl Ctx {
             .iter()
             .all(|s| s.start.as_secs() % HOUR == 0 && s.start.subsec_nanos() == 0)
             .then_some(slots)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_bolus_history_cannot_confirm_is_unknown_not_a_definitive_zero() {
+        let u = InsulinAmount::from_milliunits;
+        let d = Duration::from_secs(180);
+        // Delivered exactly what was asked: a clean completion.
+        assert_eq!(
+            completed_or(u(2_000), u(2_000), d),
+            Outcome::Completed(Report::Delivered(u(2_000)))
+        );
+        // Partially delivered: the real amount, approximated.
+        assert!(matches!(
+            completed_or(u(2_000), u(1_500), d),
+            Outcome::Approximated(Approximation::Bolus { delivered, .. }) if delivered == u(1_500)
+        ));
+        // Commanded, but history still shows nothing — the status cleared before
+        // the record landed. This must be Unknown, never a definitive zero, so the
+        // delivered insulin is reconciled from history rather than dropped from IOB.
+        assert_eq!(
+            completed_or(u(2_000), InsulinAmount::ZERO, d),
+            Outcome::Unknown
+        );
+        // A genuine zero request that delivered zero is a clean completion.
+        assert_eq!(
+            completed_or(InsulinAmount::ZERO, InsulinAmount::ZERO, d),
+            Outcome::Completed(Report::Delivered(InsulinAmount::ZERO))
+        );
     }
 }
