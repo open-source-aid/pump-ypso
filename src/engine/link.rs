@@ -100,6 +100,11 @@ pub(crate) struct Ctx {
     pub(crate) ready: Cell<bool>,
     pub(crate) stale: Cell<bool>,
     pub(crate) unpaired: Cell<bool>,
+    /// Set while the active extended bolus is the engine's own temp-basal
+    /// emulation (0% TBR + extended bolus). Cancelling the temp basal must stop
+    /// that bolus too; a user-commanded extended bolus leaves it clear so a
+    /// temp-basal cancel never touches it.
+    pub(crate) emulated_temp_basal: Cell<bool>,
     pub(crate) current: Cell<CommandId>,
     pub(crate) utc_offset: i32,
     pub(crate) variant: &'static str,
@@ -157,6 +162,7 @@ impl Ctx {
             stale: Cell::new(false),
             current: Cell::new(CommandId::new(0)),
             unpaired: Cell::new(false),
+            emulated_temp_basal: Cell::new(false),
             session,
             utc_offset,
             variant,

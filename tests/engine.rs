@@ -844,6 +844,23 @@ fn a_temp_basal_whose_clear_is_refused_is_reported() {
 
 #[cfg(feature = "delivery")]
 #[test]
+fn a_temp_basal_cancel_reports_a_refused_extended_stop() {
+    let mut run = Run::new(pump(), &Blob::default());
+    run.status();
+    // An absolute temp basal is running, emulated by a 0% TBR plus an extended
+    // bolus. Cancelling it must stop that bolus before lifting the 0%; if the stop
+    // write fails, the cancel fails outright rather than resuming scheduled basal
+    // on top of a bolus still delivering.
+    assert_eq!(run.run(absolute(1_200)), Outcome::Completed(Report::Done));
+    run.harness.device.refuse = Some((uuids::START_STOP_BOLUS, 0x87));
+    assert_eq!(
+        run.run(Command::CancelTempBasal),
+        Outcome::Failed(Failure::Status(0x87))
+    );
+}
+
+#[cfg(feature = "delivery")]
+#[test]
 fn a_cleared_temp_basal_whose_replacement_is_unconfirmed_is_unknown() {
     let mut run = Run::new(pump(), &Blob::default());
     run.status();

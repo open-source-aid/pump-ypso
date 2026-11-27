@@ -118,7 +118,13 @@ impl Ctx {
             #[cfg(feature = "delivery")]
             Plan::RateBolus(amount, duration) => return self.rate_bolus(amount, duration).await,
             #[cfg(feature = "delivery")]
-            Plan::Extended(amount, duration) => return self.extended_bolus(amount, duration).await,
+            Plan::Extended(amount, duration) => {
+                // A user's extended bolus is not the engine's temp-basal
+                // emulation, so a later temp-basal cancel must leave it alone.
+                let outcome = self.extended_bolus(amount, duration).await?;
+                self.emulated_temp_basal.set(false);
+                return Ok(outcome);
+            }
             #[cfg(feature = "delivery")]
             Plan::TempBasalAbsolute(rate, duration) => {
                 return self.absolute_temp_basal(rate, duration).await
@@ -175,6 +181,15 @@ impl Ctx {
     }
 
     async fn cancel_temp_basal(&self) -> Step<Outcome> {
+        // An absolute temp basal is emulated as a 0% TBR plus an extended bolus,
+        // so cancelling must tear down BOTH — and stop the bolus before lifting
+        // the 0%, so scheduled basal never resumes while the bolus is still
+        // delivering on top of it. Only the engine's own emulation is torn down;
+        // a user-commanded extended bolus is left to run. `cancel_extended`
+        // clears the flag.
+        if self.emulated_temp_basal.get() {
+            self.cancel_extended().await?;
+        }
         self.write(
             Characteristic::StartStopTbr,
             WriteClass::Therapy,
@@ -196,6 +211,9 @@ impl Ctx {
     }
 
     pub(crate) async fn cancel_extended(&self) -> Step<()> {
+        // After this returns, no extended bolus the engine was emulating a temp
+        // basal with is live, so it no longer owns one to tear down.
+        self.emulated_temp_basal.set(false);
         if !self.extended() || self.bolus_state().await?.extended_sequence <= 0 {
             return Ok(());
         }

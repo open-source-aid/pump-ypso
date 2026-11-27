@@ -388,6 +388,9 @@ impl Ctx {
             self.set_percent_tbr(Percent::new(0), span).await?;
             self.cancel_extended().await?;
             self.extended_bolus(amount, span).await?;
+            // This extended bolus stands in for the temp basal: a later
+            // CancelTempBasal must stop it, not just lift the 0% TBR.
+            self.emulated_temp_basal.set(true);
             return Ok(done());
         }
         Ok(refused(Refusal::OutOfLimits))

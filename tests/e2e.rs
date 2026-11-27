@@ -260,15 +260,33 @@ fn sets_and_cancels_a_temp_basal() {
     let therapy = run.status().therapy;
     assert_eq!(therapy.basal, suspended(HALF_HOUR));
     assert_eq!(therapy.extended, running_extended(600, 30));
-    assert_eq!(
-        run.run(Command::CancelExtendedBolus),
-        Outcome::Completed(Report::Done)
-    );
+    // Cancelling the temp basal on its own must tear down BOTH halves: the
+    // extended bolus that stood in for it is stopped, not left delivering on top
+    // of the scheduled basal that the 100% restores. Trio sends this cancel alone
+    // (a duration-0 temp basal), with no separate CancelExtendedBolus.
     assert_eq!(
         run.run(Command::CancelTempBasal),
         Outcome::Completed(Report::Done)
     );
-    assert_eq!(run.status().therapy.basal, Basal::Scheduled);
+    let therapy = run.status().therapy;
+    assert_eq!(therapy.basal, Basal::Scheduled);
+    assert_eq!(therapy.extended, Extended::Idle);
+}
+
+#[cfg(feature = "delivery")]
+#[test]
+fn a_temp_basal_cancel_leaves_a_users_extended_bolus_alone() {
+    let mut run = Run::new(sim(), &Blob::default());
+    run.status();
+    // A user-commanded extended bolus is not the engine's temp-basal emulation.
+    assert_eq!(run.run(extended()), Outcome::Completed(Report::Done));
+    assert_eq!(run.status().therapy.extended, running_extended(2_000, 60));
+    // A temp-basal cancel restores 100% but must not stop the user's bolus.
+    assert_eq!(
+        run.run(Command::CancelTempBasal),
+        Outcome::Completed(Report::Done)
+    );
+    assert_eq!(run.status().therapy.extended, running_extended(2_000, 60));
 }
 
 fn absolute(milli: u32, duration: Duration) -> Command {
