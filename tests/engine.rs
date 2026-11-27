@@ -114,13 +114,6 @@ fn read_all() -> Command {
     }
 }
 
-fn tbr(percent: u16) -> Command {
-    Command::TempBasal {
-        rate: TempBasalRate::Percent(Percent::new(percent)),
-        duration: Duration::from_secs(1800),
-    }
-}
-
 fn extended(milli: u32) -> Command {
     Command::ExtendedBolus {
         amount: units(milli),
@@ -176,7 +169,7 @@ fn an_unconfirmed_dose_is_unknown() {
     let mut run = Run::new(pump(), &Blob::default());
     run.status();
     run.harness.device.deaf = true;
-    assert_eq!(run.run(tbr(150)), Outcome::Unknown);
+    assert_eq!(run.run(absolute(3_000)), Outcome::Unknown);
     run.harness.device.deaf = false;
     assert_eq!(run.run(extended(2_000)), Outcome::Completed(Report::Done));
     run.harness.device.deaf = true;
@@ -315,7 +308,7 @@ fn waits_out_the_basal_window_on_older_control_services() {
     run.status();
     let start = run.harness.now;
     if cfg!(feature = "delivery") {
-        assert_eq!(run.run(tbr(150)), Outcome::Completed(Report::Done));
+        assert_eq!(run.run(absolute(1_200)), Outcome::Completed(Report::Done));
         assert!(run.harness.now.as_millis() - start.as_millis() >= 5_000);
     }
     run.engine
@@ -450,7 +443,7 @@ fn walks_the_credential_ladder() {
 fn observes_what_the_pump_is_doing() {
     let mut run = Run::new(sim(), &Blob::default());
     run.status();
-    run.run(tbr(150));
+    run.run(absolute(0));
     run.run(extended(3_000));
     run.engine
         .submit(Command::Bolus {
@@ -467,7 +460,7 @@ fn observes_what_the_pump_is_doing() {
         Basal::Temporary {
             rate: TempBasalRate::Percent(percent),
             ..
-        } if percent == Percent::new(150)
+        } if percent == Percent::new(0)
     ));
     assert!(matches!(therapy.bolus, Bolus::Immediate { .. }));
     assert_eq!(
@@ -775,7 +768,7 @@ fn a_temp_basal_the_pump_reports_already_running_is_busy() {
     let mut run = Run::new(pump(), &Blob::default());
     run.status();
     run.harness.device.refuse = Some((uuids::START_STOP_TBR, 0xB0));
-    assert_eq!(run.run(tbr(150)), Outcome::Refused(Refusal::Busy));
+    assert_eq!(run.run(absolute(1_200)), Outcome::Refused(Refusal::Busy));
 }
 
 #[cfg(feature = "delivery")]
@@ -790,11 +783,58 @@ fn an_unconfirmed_absolute_temp_basal_is_unknown() {
 #[cfg(feature = "delivery")]
 #[test]
 fn clearing_a_temp_basal_before_an_unconfirmed_one_is_unknown() {
+    // A running 0% TBR is left by the first absolute temp basal; the second must
+    // clear it first. When the clear succeeds but the new dose cannot be confirmed
+    // the outcome is unknown, not a silent success.
     let mut run = Run::new(pump(), &Blob::default());
     run.status();
-    assert_eq!(run.run(tbr(150)), Outcome::Completed(Report::Done));
+    assert_eq!(run.run(absolute(1_200)), Outcome::Completed(Report::Done));
     run.harness.device.deaf = true;
-    assert_eq!(run.run(tbr(80)), Outcome::Unknown);
+    assert_eq!(run.run(absolute(820)), Outcome::Unknown);
+}
+
+#[cfg(feature = "delivery")]
+#[test]
+fn a_temp_basal_whose_clear_is_refused_is_reported() {
+    let mut run = Run::new(pump(), &Blob::default());
+    run.status();
+    assert_eq!(run.run(absolute(1_200)), Outcome::Completed(Report::Done));
+    // Setting another temp basal must first clear the running one; that clear write
+    // now fails outright, and the failure is surfaced rather than dropped.
+    run.harness.device.refuse = Some((uuids::START_STOP_TBR, 0xB0));
+    assert_eq!(
+        run.run(absolute(820)),
+        Outcome::Failed(Failure::Status(0xB0))
+    );
+}
+
+#[cfg(feature = "delivery")]
+#[test]
+fn a_cleared_temp_basal_whose_replacement_is_unconfirmed_is_unknown() {
+    let mut run = Run::new(pump(), &Blob::default());
+    run.status();
+    // The pump keeps reporting a running non-neutral TBR (50%): a new temp basal
+    // clears it first, but the 0% it then sets never reads back, so delivery cannot
+    // be confirmed. Having already cleared the old TBR, that is unknown, not a plain
+    // failure. (18 bytes, so `System::decode` skips the CRC check.)
+    let mut frame = vec![10u8];
+    frame.extend(1_000i32.to_le_bytes()); // reservoir
+    frame.push(4); // battery
+    frame.extend(800i32.to_le_bytes()); // basal rate
+    frame.extend(50i32.to_le_bytes()); // percent: a running 50% TBR
+    frame.extend(0i32.to_le_bytes()); // remaining
+    run.harness.device.answer = Some((uuids::GET_SYSTEM_STATUS, frame));
+    assert_eq!(run.run(absolute(1_200)), Outcome::Unknown);
+}
+
+#[cfg(feature = "delivery")]
+#[test]
+fn a_refused_suspend_is_reported() {
+    let mut run = Run::new(pump(), &Blob::default());
+    run.status();
+    // A rate-0 suspend whose 0% TBR write is refused is reported, not swallowed.
+    run.harness.device.refuse = Some((uuids::START_STOP_TBR, 0xB0));
+    assert_eq!(run.run(absolute(0)), Outcome::Refused(Refusal::Busy));
 }
 
 #[cfg(feature = "delivery")]

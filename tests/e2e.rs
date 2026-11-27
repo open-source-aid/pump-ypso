@@ -228,39 +228,31 @@ fn reads_and_writes_the_basal_profile() {
 #[test]
 fn sets_and_cancels_a_temp_basal() {
     let mut run = Run::new(sim(), &Blob::default());
-    let set = |percent| temp_basal(percent, HALF_HOUR);
+    run.status();
     if !cfg!(feature = "delivery") {
-        assert_eq!(run.run(set(150)), Outcome::Refused(Refusal::NotBuilt));
+        assert_eq!(
+            run.run(absolute(1_200, HALF_HOUR)),
+            Outcome::Refused(Refusal::NotBuilt)
+        );
         assert_eq!(
             run.run(Command::CancelTempBasal),
             Outcome::Completed(Report::Done)
         );
         return;
     }
-    let running = |percent| Basal::Temporary {
-        rate: TempBasalRate::Percent(Percent::new(percent)),
-        duration: HALF_HOUR,
-    };
-    assert_eq!(run.run(set(150)), Outcome::Completed(Report::Done));
-    assert_eq!(run.engine.therapy().basal, running(150));
-    assert_eq!(run.status().therapy.basal, running(150));
-    assert_eq!(run.run(set(80)), Outcome::Completed(Report::Done));
-    assert_eq!(run.status().therapy.basal, running(80));
-    assert_eq!(run.run(set(100)), Outcome::Completed(Report::Done));
-    assert_eq!(run.status().therapy.basal, Basal::Scheduled);
-    assert_eq!(run.run(set(80)), Outcome::Completed(Report::Done));
+    // A percent temp basal is no longer offered — it needs the pump's schedule,
+    // which a host cannot read — so it is refused; the host sends an absolute rate.
     assert_eq!(
-        run.run(Command::CancelTempBasal),
+        run.run(temp_basal(150, HALF_HOUR)),
+        Outcome::Refused(Refusal::Unsupported)
+    );
+    // A neutral (100%) rate is the cancel path, not a temp basal, so it is honoured.
+    assert_eq!(
+        run.run(temp_basal(100, HALF_HOUR)),
         Outcome::Completed(Report::Done)
     );
-    assert_eq!(run.status().therapy.basal, Basal::Scheduled);
-    for refused in [
-        set(260),
-        temp_basal(220, Duration::from_secs(150 * 60)),
-        temp_basal(150, Duration::from_secs(20 * 60)),
-    ] {
-        assert_eq!(run.run(refused), Outcome::Refused(Refusal::OutOfLimits));
-    }
+    // An absolute rate is delivered as a 0% TBR plus an extended bolus, and both
+    // cancel cleanly back to scheduled basal.
     assert_eq!(
         run.run(absolute(1_200, HALF_HOUR)),
         Outcome::Completed(Report::Done)
@@ -268,6 +260,15 @@ fn sets_and_cancels_a_temp_basal() {
     let therapy = run.status().therapy;
     assert_eq!(therapy.basal, suspended(HALF_HOUR));
     assert_eq!(therapy.extended, running_extended(600, 30));
+    assert_eq!(
+        run.run(Command::CancelExtendedBolus),
+        Outcome::Completed(Report::Done)
+    );
+    assert_eq!(
+        run.run(Command::CancelTempBasal),
+        Outcome::Completed(Report::Done)
+    );
+    assert_eq!(run.status().therapy.basal, Basal::Scheduled);
 }
 
 fn absolute(milli: u32, duration: Duration) -> Command {
@@ -302,7 +303,8 @@ fn delivers_an_absolute_temp_basal_as_an_extended_bolus() {
             Outcome::Completed(Report::Done)
         );
         let therapy = run.status().therapy;
-        assert_eq!(therapy.basal, suspended(duration));
+        // The 0% TBR covers exactly the extended-bolus window, reported as such.
+        assert_eq!(therapy.basal, suspended(Duration::from_secs(window * 60)));
         assert_eq!(therapy.extended, running_extended(milli, window));
         assert_eq!(
             run.run(Command::CancelExtendedBolus),
@@ -334,8 +336,12 @@ fn delivers_an_absolute_temp_basal_as_an_extended_bolus() {
     );
 
     for refused in [
+        // Too high to land within tolerance even in the shortest window.
         absolute(200_000, HALF_HOUR),
-        absolute(60_000, Duration::from_secs(1_000_000_000_000)),
+        // Too low to make the 0.10 U floor inside the fail-safe window: it would
+        // need a window past 30 minutes, which is refused rather than suspended-
+        // under-bolus for longer than the fail-safe.
+        absolute(100, HALF_HOUR),
     ] {
         assert_eq!(run.run(refused), Outcome::Refused(Refusal::OutOfLimits));
     }
@@ -343,16 +349,21 @@ fn delivers_an_absolute_temp_basal_as_an_extended_bolus() {
 
 #[cfg(feature = "delivery")]
 #[test]
-fn an_absolute_temp_basal_stretches_a_low_rate_over_a_longer_window() {
+fn an_absolute_temp_basal_caps_the_window_and_ignores_the_schedule() {
     let mut run = Run::new(sim(), &Blob::default());
     run.status();
-    // A rate too low to make the minimum bolus over the asked duration stretches
-    // the window until the amount clears the floor, independent of the schedule.
+    // A temp basal longer than the fail-safe window is delivered in a window the
+    // 0% TBR covers exactly (here 30 of the asked 120 minutes), so scheduled basal
+    // never resumes under a running bolus however long the host asked for.
     assert_eq!(
-        run.run(absolute(100, HALF_HOUR)),
+        run.run(absolute(2_000, Duration::from_secs(2 * 3600))),
         Outcome::Completed(Report::Done)
     );
-    assert_eq!(run.status().therapy.extended, running_extended(100, 60));
+    assert_eq!(run.status().therapy.extended, running_extended(1_000, 30));
+    assert_eq!(
+        run.status().therapy.basal,
+        suspended(Duration::from_secs(30 * 60))
+    );
     assert_eq!(
         run.run(Command::CancelExtendedBolus),
         Outcome::Completed(Report::Done)
@@ -361,7 +372,8 @@ fn an_absolute_temp_basal_stretches_a_low_rate_over_a_longer_window() {
         run.run(Command::CancelTempBasal),
         Outcome::Completed(Report::Done)
     );
-    // A rate that stays below the floor even stretched to the limit is refused.
+    // A rate too low to clear the 0.10 U floor within the fail-safe window is
+    // refused rather than suspending basal past the fail-safe.
     assert_eq!(
         run.run(absolute(50, HALF_HOUR)),
         Outcome::Refused(Refusal::OutOfLimits)
@@ -1099,15 +1111,14 @@ fn reads_only_what_is_newer_in_every_log() {
 fn history_follows_what_the_pump_did() {
     let mut run = Run::new(sim(), &Blob::default());
     run.status();
+    // An absolute temp basal lays down a 0% TBR and an extended bolus; after it
+    // delivers a while, cancelling both and then triggering an occlusion leaves
+    // history carrying an ended temp basal, an extended bolus with its real
+    // delivered amount, and an alarm — each decoded from the pump's own record.
     assert_eq!(
-        run.run(temp_basal(150, HALF_HOUR)),
+        run.run(absolute(1_200, HALF_HOUR)),
         Outcome::Completed(Report::Done)
     );
-    assert_eq!(
-        run.run(Command::CancelTempBasal),
-        Outcome::Completed(Report::Done)
-    );
-    assert_eq!(run.run(extended()), Outcome::Completed(Report::Done));
     run.harness
         .advance(run.engine.as_mut(), Duration::from_secs(600))
         .unwrap();
@@ -1116,30 +1127,45 @@ fn history_follows_what_the_pump_did() {
         Outcome::Completed(Report::Done)
     );
     assert_eq!(
-        run.run(temp_basal(80, HALF_HOUR)),
+        run.run(Command::CancelTempBasal),
         Outcome::Completed(Report::Done)
     );
-    run.harness
-        .advance(run.engine.as_mut(), Duration::from_secs(300))
-        .unwrap();
     let now = run.harness.now;
     run.harness
         .device
         .alarm(pump_ypso::sim::Alarm::Occlusion, now);
     let events: Vec<_> = run.history(0).into_iter().map(|e| e.event).collect();
     assert!(
-        matches!(
-            events[..],
-            [
-                HistoryEvent::Suspended,
-                HistoryEvent::TempBasal { rate: TempBasalRate::Percent(p), duration: d, phase: TempBasalPhase::Ended },
-                HistoryEvent::Bolus { kind: BolusKind::Extended, delivered, in_progress: false, .. },
-                HistoryEvent::TempBasal { rate: TempBasalRate::Percent(q), phase: TempBasalPhase::Ended, .. },
-                HistoryEvent::Alarm(Alarm { kind: AlarmKind::Occlusion, code: 105 }),
-            ] if p == Percent::new(80) && q == Percent::new(150)
-                && d >= Duration::from_secs(300) && d < HALF_HOUR
-                && delivered > units(0) && delivered < units(2_000)
-        ),
+        events.iter().any(|e| matches!(
+            e,
+            HistoryEvent::TempBasal {
+                rate: TempBasalRate::Percent(p),
+                phase: TempBasalPhase::Ended,
+                ..
+            } if *p == Percent::new(0)
+        )),
+        "{events:?}"
+    );
+    assert!(
+        events.iter().any(|e| matches!(
+            e,
+            HistoryEvent::Bolus {
+                kind: BolusKind::Extended,
+                delivered,
+                in_progress: false,
+                ..
+            } if *delivered > units(0) && *delivered < units(2_000)
+        )),
+        "{events:?}"
+    );
+    assert!(
+        events.iter().any(|e| matches!(
+            e,
+            HistoryEvent::Alarm(Alarm {
+                kind: AlarmKind::Occlusion,
+                ..
+            })
+        )),
         "{events:?}"
     );
 }
@@ -1149,8 +1175,10 @@ fn history_follows_what_the_pump_did() {
 fn a_temp_basal_decodes_started_while_running_then_ended() {
     let mut run = Run::new(sim(), &Blob::default());
     run.status();
+    // An absolute temp basal lays down a 0% TBR, which the pump logs as a started
+    // percent TBR.
     assert_eq!(
-        run.run(temp_basal(150, HALF_HOUR)),
+        run.run(absolute(1_200, HALF_HOUR)),
         Outcome::Completed(Report::Done)
     );
     let running = run.history(0);
@@ -1164,7 +1192,7 @@ fn a_temp_basal_decodes_started_while_running_then_ended() {
     assert_eq!(
         started,
         (
-            TempBasalRate::Percent(Percent::new(150)),
+            TempBasalRate::Percent(Percent::new(0)),
             TempBasalPhase::Started
         )
     );

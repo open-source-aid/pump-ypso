@@ -120,8 +120,6 @@ impl Ctx {
             #[cfg(feature = "delivery")]
             Plan::Extended(amount, duration) => return self.extended_bolus(amount, duration).await,
             #[cfg(feature = "delivery")]
-            Plan::TempBasal(percent, duration) => return self.temp_basal(percent, duration).await,
-            #[cfg(feature = "delivery")]
             Plan::TempBasalAbsolute(rate, duration) => {
                 return self.absolute_temp_basal(rate, duration).await
             }
@@ -274,8 +272,6 @@ enum Plan {
     #[cfg(feature = "delivery")]
     Extended(pump_shared::InsulinAmount, Duration),
     #[cfg(feature = "delivery")]
-    TempBasal(pump_shared::Percent, Duration),
-    #[cfg(feature = "delivery")]
     TempBasalAbsolute(pump_shared::BasalRate, Duration),
     #[cfg(feature = "delivery")]
     SetProfile(BasalProfile),
@@ -294,11 +290,6 @@ impl Plan {
             #[cfg(feature = "delivery")]
             Self::Extended(amount, duration) => Command::ExtendedBolus {
                 amount: *amount,
-                duration: *duration,
-            },
-            #[cfg(feature = "delivery")]
-            Self::TempBasal(percent, duration) => Command::TempBasal {
-                rate: TempBasalRate::Percent(*percent),
                 duration: *duration,
             },
             #[cfg(feature = "delivery")]
@@ -331,11 +322,6 @@ fn plan(command: Command) -> Result<Plan, Refusal> {
         Command::RateBolus { amount, duration } => Plan::RateBolus(amount, duration),
         #[cfg(feature = "delivery")]
         Command::ExtendedBolus { amount, duration } => Plan::Extended(amount, duration),
-        #[cfg(feature = "delivery")]
-        Command::TempBasal {
-            rate: TempBasalRate::Percent(percent),
-            duration,
-        } => Plan::TempBasal(percent, duration),
         #[cfg(feature = "delivery")]
         Command::TempBasal {
             rate: TempBasalRate::Absolute(rate),

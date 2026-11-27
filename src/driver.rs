@@ -7,7 +7,7 @@ use pump_shared::NotifyKind;
 use pump_shared::{
     Address, Advertisement, BasalRate, BleMatch, Class, CommandKind, Config, Driver, DriverInfo,
     DriverMatch, Engine, Feature, GattChar, InsulinAmount, Kind, Nominal, NominalBounds,
-    NominalCapabilities, NominalLimits, Percent, Slot, Tier, Variant,
+    NominalCapabilities, NominalLimits, Slot, Tier, Variant,
 };
 
 use crate::engine::YpsoEngine;
@@ -125,19 +125,34 @@ static NOMINAL: Nominal = Nominal {
                 },
             ],
         }),
-        // Settings 116/118 cap the scale at 200 % on every pump we have seen,
-        // and the engine builds the percent bounds with a 1 % step.
-        temp_basal_percent: Some(NominalBounds {
-            min: Percent::new(0),
-            max: Percent::new(200),
-            tiers: &[Tier {
-                from: Percent::new(0),
-                step: Percent::new(1),
-            }],
+        // No percent temp basal: it is meaningful only against the pump's basal
+        // profile, which a host cannot read. The family exposes temp basal as an
+        // absolute rate instead, delivered through an extended bolus
+        // (`.docs/extended-bolus-emulation.md`), on the basal-rate grid from 0 to
+        // the max basal.
+        temp_basal_percent: None,
+        temp_basal_absolute: Some(NominalBounds {
+            min: rate(0),
+            max: rate(40_000),
+            tiers: &[
+                Tier {
+                    from: rate(0),
+                    step: rate(10),
+                },
+                Tier {
+                    from: rate(1_000),
+                    step: rate(20),
+                },
+                Tier {
+                    from: rate(2_000),
+                    step: rate(100),
+                },
+                Tier {
+                    from: rate(15_000),
+                    step: rate(500),
+                },
+            ],
         }),
-        // The pump has no absolute temp basal at all; the engine reaches one
-        // by other means (`.docs/extended-bolus-emulation.md`).
-        temp_basal_absolute: None,
         // 15 minutes to 4 hours in 15-minute steps: `QUARTER` in
         // `Device::new`, settings 117/119.
         temp_basal_duration: Some(NominalBounds {
@@ -421,13 +436,14 @@ mod tests {
     }
 
     #[test]
-    fn the_nominal_temp_basal_is_percent_only_and_capped_at_four_hours() {
+    fn the_nominal_temp_basal_is_absolute_on_the_basal_grid_and_capped_at_four_hours() {
         let limits = &family().limits;
-        assert_eq!(limits.temp_basal_absolute, None);
-        let percent = limits.temp_basal_percent.unwrap();
-        assert_eq!(percent.min, Percent::new(0));
-        assert_eq!(percent.max, Percent::new(200));
-        assert_eq!(percent.values().len(), 201);
+        assert_eq!(limits.temp_basal_percent, None);
+        let absolute = limits.temp_basal_absolute.unwrap();
+        assert_eq!(absolute.min, rate(0));
+        assert_eq!(absolute.max, rate(40_000));
+        // The same grid as the basal rate.
+        assert_eq!(absolute.tiers, limits.basal.unwrap().tiers);
         let duration = limits.temp_basal_duration.unwrap();
         assert_eq!(duration.min, QUARTER);
         assert_eq!(duration.max, Duration::from_secs(4 * 3600));

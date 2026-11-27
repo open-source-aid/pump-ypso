@@ -90,7 +90,12 @@ fn completed_or(requested: InsulinAmount, delivered: InsulinAmount, duration: Du
 const COMMAND_FAILED: u8 = 0x87;
 const TBR_RUNNING: u8 = 0xB0;
 const MIN_EXTENDED: u32 = 100;
-const ZERO_RATE_EXTENSION: u64 = 15;
+/// The fail-safe ceiling, in minutes, on the 0% TBR that an absolute temp basal
+/// lays down to suspend scheduled basal. A host re-issues well within it, so it
+/// only bites when the host or link falls silent — then scheduled basal resumes
+/// within this window instead of staying suspended for hours. Capped here and
+/// lowered further by the pump's own short-TBR limit (`TBR_SHORT_DURATION_MAX`).
+const FALLBACK_SUSPEND: u64 = 30;
 const SLOW_STEP: u64 = 15;
 const STRETCH_LIMIT: u64 = 60;
 const STEP_ITERS: usize = 64;
@@ -300,23 +305,14 @@ impl Ctx {
         Ok(done())
     }
 
-    pub(super) async fn temp_basal(&self, percent: Percent, duration: Duration) -> Step<Outcome> {
-        let allowed = self.device.borrow().allows_temp_basal(percent, duration);
-        if !allowed {
-            return Ok(refused(Refusal::OutOfLimits));
-        }
-        self.set_percent_tbr(percent, duration, duration).await?;
-        Ok(done())
-    }
-
-    async fn set_percent_tbr(
-        &self,
-        percent: Percent,
-        pump_duration: Duration,
-        reported: Duration,
-    ) -> Step<()> {
+    /// Set a native percent TBR for `duration`. The reported duration is exactly
+    /// what is programmed on the pump — never the host's original request — so a
+    /// capped absolute temp basal does not leave the host modelling a longer dose
+    /// than the pump will deliver (which, for a rate below the scheduled basal,
+    /// would read IOB low and oversize the next dose if the host went silent).
+    async fn set_percent_tbr(&self, percent: Percent, duration: Duration) -> Step<()> {
         self.wait_window(false, None).await?;
-        self.wait_window(true, Some(pump_duration)).await?;
+        self.wait_window(true, Some(duration)).await?;
         let cleared = self.system().await?.percent != 100;
         if cleared {
             self.write(
@@ -329,16 +325,13 @@ impl Ctx {
         }
         let value = i32::from(percent.get());
         let after = |halt| if cleared { unknown(halt) } else { halt };
-        self.dose(
-            Characteristic::StartStopTbr,
-            &tbr(value, minutes(pump_duration)),
-        )
-        .await
-        .map_err(after)?;
+        self.dose(Characteristic::StartStopTbr, &tbr(value, minutes(duration)))
+            .await
+            .map_err(after)?;
         self.verify_percent(value).await.map_err(after)?;
         self.apply(Transition::TempBasalStarted {
             rate: TempBasalRate::Percent(percent),
-            duration: reported,
+            duration,
         });
         Ok(())
     }
@@ -349,23 +342,35 @@ impl Ctx {
         duration: Duration,
     ) -> Step<Outcome> {
         let request = u64::from(requested.milliunits_per_hour());
+        // Fail-safe: scheduled basal is suppressed for at most this window, so a
+        // host that falls silent leaves it off for minutes, not hours. Clamped in
+        // the driver and lowered further by the pump's own short-TBR limit.
+        let fail_safe = self.device.borrow().short_minutes.min(FALLBACK_SUSPEND);
+        let minutes = (duration.as_secs() / 60).min(fail_safe);
         if request == 0 {
-            return self.temp_basal(Percent::new(0), duration).await;
+            // Suspend: a native 0% TBR, no extended bolus and no firmware gate.
+            self.set_percent_tbr(Percent::new(0), Duration::from_secs(minutes * 60))
+                .await?;
+            return Ok(done());
         }
         if !self.extended() {
             return Ok(refused(Refusal::Unsupported));
         }
-        let minutes = duration.as_secs() / 60;
         let (amount, window) = self.plan_extended(requested, minutes);
         let achieved = u64::from(amount.milliunits()).saturating_mul(60) / window;
-        if amount.milliunits() >= MIN_EXTENDED && within_tolerance(request, achieved) {
-            let ceiling = self.device.borrow().long_minutes;
-            let pump = (minutes + ZERO_RATE_EXTENSION).min(ceiling);
-            self.set_percent_tbr(Percent::new(0), Duration::from_secs(pump * 60), duration)
-                .await?;
+        // The 0% TBR and the extended bolus share ONE window, so a silent host
+        // lapses both together — scheduled basal never resumes under a running
+        // bolus — and the suspension never outlasts the fail-safe window. A rate
+        // whose plan would need a longer window than the fail-safe allows is
+        // refused rather than delivered with the two diverging.
+        if amount.milliunits() >= MIN_EXTENDED
+            && window <= fail_safe
+            && within_tolerance(request, achieved)
+        {
+            let span = Duration::from_secs(window * 60);
+            self.set_percent_tbr(Percent::new(0), span).await?;
             self.cancel_extended().await?;
-            self.extended_bolus(amount, Duration::from_secs(window * 60))
-                .await?;
+            self.extended_bolus(amount, span).await?;
             return Ok(done());
         }
         Ok(refused(Refusal::OutOfLimits))

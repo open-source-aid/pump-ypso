@@ -129,8 +129,8 @@ fn running(status: u8, delivered: InsulinAmount, total: InsulinAmount) -> bool {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct Device {
     pub(crate) limits: Limits,
-    pub(crate) long_percent: u16,
-    pub(crate) long_minutes: u64,
+    /// The pump's short-TBR duration limit, the configurable knob that caps the
+    /// basal-suspending 0% TBR (see `delivery::suspend_minutes`).
     pub(crate) short_minutes: u64,
 }
 
@@ -152,38 +152,48 @@ fn rate(milli: u32) -> BasalRate {
 impl Device {
     pub(crate) fn new(step: u32, basal: (u32, u32), tbr: [u64; 4], extended: bool) -> Self {
         let amount = InsulinAmount::from_milliunits;
-        let [long_percent, long_minutes, short_percent, short_minutes] = tbr;
+        let [_, long_minutes, _, short_minutes] = tbr;
+        let tiers = vec![
+            Tier {
+                from: rate(0),
+                step: rate(10),
+            },
+            Tier {
+                from: rate(1_000),
+                step: rate(20),
+            },
+            Tier {
+                from: rate(2_000),
+                step: rate(100),
+            },
+            Tier {
+                from: rate(15_000),
+                step: rate(500),
+            },
+        ];
         Self {
             limits: Limits {
                 bolus: Bounds::uniform(amount(step), amount(25_000), amount(step)),
                 basal: Bounds {
                     min: rate(basal.0),
                     max: rate(basal.1),
-                    tiers: vec![
-                        Tier {
-                            from: rate(0),
-                            step: rate(10),
-                        },
-                        Tier {
-                            from: rate(1_000),
-                            step: rate(20),
-                        },
-                        Tier {
-                            from: rate(2_000),
-                            step: rate(100),
-                        },
-                        Tier {
-                            from: rate(15_000),
-                            step: rate(500),
-                        },
-                    ],
+                    tiers: tiers.clone(),
                 },
-                temp_basal_percent: Some(Bounds::uniform(
-                    Percent::new(0),
-                    Percent::new(long_percent.max(short_percent) as u16),
-                    Percent::new(1),
-                )),
-                temp_basal_absolute: None,
+                // No percent temp basal: it is meaningful only against the pump's
+                // own basal profile, which a host cannot read, so it is not
+                // offered. An absolute temp basal is delivered through an extended
+                // bolus, so it is declared only where that exists (control > 1.1);
+                // rate 0 (suspend) is a native 0% TBR and the host reaches it
+                // through the same declaration. Bounds: 0 up to the pump's max
+                // basal, on the basal-rate grid. A rate the extended-bolus plan
+                // cannot honour for a duration is refused at delivery, never
+                // under-delivered.
+                temp_basal_percent: None,
+                temp_basal_absolute: extended.then(|| Bounds {
+                    min: rate(0),
+                    max: rate(basal.1),
+                    tiers,
+                }),
                 temp_basal_duration: Bounds::uniform(
                     QUARTER,
                     MINUTE * long_minutes.max(short_minutes) as u32,
@@ -192,26 +202,12 @@ impl Device {
                 extended_bolus_duration: extended
                     .then(|| Bounds::uniform(QUARTER, MINUTE * 720, MINUTE)),
             },
-            long_percent: long_percent as u16,
-            long_minutes,
             short_minutes,
         }
     }
 
     pub(crate) fn defaults() -> Self {
         Self::new(50, (20, 40_000), [200, 240, 200, 240], false)
-    }
-
-    #[cfg(feature = "delivery")]
-    pub(crate) fn allows_temp_basal(&self, percent: Percent, duration: Duration) -> bool {
-        let max = if percent.get() <= self.long_percent {
-            self.long_minutes
-        } else {
-            self.short_minutes
-        };
-        self.limits
-            .allows_temp_basal(TempBasalRate::Percent(percent), duration)
-            && duration <= MINUTE * max as u32
     }
 }
 
@@ -306,6 +302,19 @@ impl Ctx {
         for (value, id) in tbr.iter_mut().zip(setting::TBR_LONG_SCALE_MAX..) {
             *value = self.setting_or(id, *value as i32).await? as u64;
         }
+        // Diagnostic (feature `diag`): the four TBR limit settings as read, so the
+        // real percent/duration maxima (116-119) can be measured, not inferred.
+        #[cfg(feature = "diag")]
+        self.emit(Event::Log {
+            level: 1,
+            line: alloc::format!(
+                "ypso tbr settings 116={} 117={} 118={} 119={}",
+                tbr[0],
+                tbr[1],
+                tbr[2],
+                tbr[3]
+            ),
+        });
         Ok(Device::new(
             milli(step),
             (milli(min.unwrap_or(0)), milli(upper)),
