@@ -139,6 +139,40 @@ fn entry(kind: u8, index: u16) -> Vec<u8> {
     bytes
 }
 
+fn record(kind: u8, sequence: u32) -> Vec<u8> {
+    let mut bytes = 0u32.to_le_bytes().to_vec();
+    bytes.push(kind);
+    bytes.extend([0; 6]);
+    bytes.extend(sequence.to_le_bytes());
+    bytes.extend(0u16.to_le_bytes());
+    let crc = crc16(&bytes);
+    bytes.extend(crc.to_le_bytes());
+    bytes
+}
+
+// A delivery record is rewritten in place when it finishes: the pump keeps its
+// slot, timestamp and sequence and only swaps the payload from in-progress to
+// complete. If the reported cursor were allowed to reach a still-running record,
+// the completion would later read as `<= cursor` and no longer running, the walk
+// would stop on it, and the finished dose would vanish from the history — the
+// host would under-count insulin and could redose over it.
+#[test]
+fn a_delivery_rewritten_in_place_after_its_sequence_is_still_reported() {
+    let mut run = Run::new(log_of(1), &Blob::default());
+
+    // In progress at sequence 7 (kind 1 = extended bolus, still running).
+    run.harness.device.answer = Some((uuids::EVENT_ENTRY_VALUE, record(1, 7)));
+    let (entries, newest) = run.history_page(0, None);
+    assert_eq!(entries.len(), 1);
+    // The reported cursor stays strictly below the still-running record.
+    assert!(newest.get() & 0xFFFF < 7);
+
+    // It completes in place: same sequence 7, now kind 3 (complete).
+    run.harness.device.answer = Some((uuids::EVENT_ENTRY_VALUE, record(3, 7)));
+    let (entries, _) = run.history_page(newest.get(), None);
+    assert_eq!(entries.len(), 1, "the finished dose must still be reported");
+}
+
 #[cfg(feature = "delivery")]
 #[test]
 fn a_pump_that_cannot_deliver_refuses_the_dose() {

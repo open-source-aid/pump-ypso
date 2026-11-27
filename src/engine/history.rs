@@ -308,6 +308,24 @@ impl Ctx {
         // Log-encoded like the entries' own sequence, so the host compares it
         // against the page and its cursor; the event-tagged zero on an empty log.
         let newest = newest.unwrap_or_else(|| Sequence::new((Log::Event as u32) << LOG_SHIFT));
+        // A delivery record is rewritten in place when it finishes: the pump keeps
+        // its slot, timestamp and sequence and only swaps the payload from
+        // in-progress to complete. So the resume cursor must never reach or pass a
+        // record that is still running — otherwise, once it completes, the next
+        // walk finds it `<= cursor` and no longer running, stops on it, and the
+        // finished dose is dropped for good. Hold `newest` just below the oldest
+        // still-running record in the page; a host that resumes there re-reads
+        // each one and sees its completion.
+        let newest = raws
+            .iter()
+            .filter(|raw| running(raw))
+            .map(|raw| raw.sequence)
+            .min()
+            .map_or(newest, |floor| {
+                let floor =
+                    ((Log::Event as u32) << LOG_SHIFT) | (floor.saturating_sub(1) & SEQUENCE_MASK);
+                Sequence::new(newest.get().min(floor))
+            });
         let mut entries = self.entries(Log::Event, raws);
         for log in [Log::Alarm, Log::Complaint] {
             let older = |raw: &Raw| cutoff.is_some_and(|s| raw.seconds < s);
