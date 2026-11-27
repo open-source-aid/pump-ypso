@@ -318,7 +318,11 @@ fn delivers_an_absolute_temp_basal_as_an_extended_bolus() {
     // The requested rate becomes a bolus of rate * window / 60, delivered over a
     // window stretched or shrunk to land the amount inside the bolus limits.
     deliver(1_200, HALF_HOUR, 600, 30);
-    deliver(820, HALF_HOUR, 400, 30);
+    deliver(820, HALF_HOUR, 410, 30);
+    // A rate off the pump's bolus-step grid: the amount rounds to the wire's own
+    // 0.01 U resolution (0.34 U for 0.67 U/h), landing within tolerance. On the
+    // coarser bolus-step grid this snapped to 0.30 U and was refused on hardware.
+    deliver(670, HALF_HOUR, 340, 30);
     deliver(1_200, Duration::from_secs(20 * 60), 400, 20);
     deliver(3_000, HALF_HOUR, 1_500, 30);
     deliver(60_000, HOUR, 15_000, 15);

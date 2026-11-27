@@ -90,6 +90,13 @@ fn completed_or(requested: InsulinAmount, delivered: InsulinAmount, duration: Du
 const COMMAND_FAILED: u8 = 0x87;
 const TBR_RUNNING: u8 = 0xB0;
 const MIN_EXTENDED: u32 = 100;
+/// The extended-bolus amount crosses the wire in hundredths of a unit (0.01 U).
+/// The firmware range-checks it and never quantises it to the pump's configured
+/// bolus step (verified against `BLL_DoseSvc_StartSlowBolus`), so the plan rounds
+/// the emulated amount to this native 0.01 U grid rather than the ~10x coarser
+/// step grid, which is what let arbitrary temp-basal rates fall outside
+/// tolerance and be refused.
+const EXTENDED_STEP: u32 = 10;
 /// The fail-safe ceiling, in minutes, on the 0% TBR that an absolute temp basal
 /// lays down to suspend scheduled basal. A host re-issues well within it, so it
 /// only bites when the host or link falls silent — then scheduled basal resumes
@@ -286,12 +293,22 @@ impl Ctx {
         if !self.extended() {
             return Ok(refused(Refusal::Unsupported));
         }
-        let allowed = self
-            .device
-            .borrow()
-            .limits
-            .allows_extended_bolus(amount, duration);
-        if !allowed || amount.milliunits() < MIN_EXTENDED {
+        // The firmware range-checks an extended-bolus amount (0.10 U .. cap) and
+        // the duration, and does not snap the amount to the bolus step, so the
+        // amount is validated on range alone — matching the pump — rather than
+        // through `allows_extended_bolus`, whose step-grid check would reject the
+        // 0.01 U-resolution amounts the plan now produces.
+        let allowed = {
+            let limits = &self.device.borrow().limits;
+            let mu = amount.milliunits();
+            mu >= MIN_EXTENDED
+                && mu <= limits.bolus.max.milliunits()
+                && limits
+                    .extended_bolus_duration
+                    .as_ref()
+                    .is_some_and(|b| b.allows(duration))
+        };
+        if !allowed {
             return Ok(refused(Refusal::OutOfLimits));
         }
         self.wait_window(true, None).await?;
@@ -390,9 +407,10 @@ impl Ctx {
             window -= SLOW_STEP;
             steps += 1;
         }
-        let target =
-            InsulinAmount::from_milliunits(u32::try_from(over(window)).unwrap_or(u32::MAX));
-        let amount = bounds.nearest(target).unwrap_or(bounds.min);
+        let max_mu = bounds.max.milliunits();
+        let ideal = u32::try_from(over(window)).unwrap_or(u32::MAX).min(max_mu);
+        let rounded = (ideal + EXTENDED_STEP / 2) / EXTENDED_STEP * EXTENDED_STEP;
+        let amount = InsulinAmount::from_milliunits(rounded.clamp(MIN_EXTENDED, max_mu));
         (amount, window)
     }
 
